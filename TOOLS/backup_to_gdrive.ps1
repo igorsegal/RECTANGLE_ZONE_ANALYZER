@@ -1,5 +1,5 @@
 param(
-    [string]$BackupRoot = "G:\Мой диск\AHexaTrader_BACKUP\RECTANGLE_ZONE_ANALYZER"
+    [string]$BackupRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,6 +8,19 @@ Set-StrictMode -Version Latest
 function Fail([string]$Message) {
     Write-Host "[FAIL] $Message"
     exit 1
+}
+
+function Default-BackupRoot {
+    # Build "My Drive" in Russian from Unicode code points.
+    # The script source stays ASCII-only so Windows PowerShell 5.1 cannot
+    # corrupt the path when reading a UTF-8 file without BOM.
+    $codes = 0x041C,0x043E,0x0439,0x0020,0x0434,0x0438,0x0441,0x043A
+    $myDrive = -join ($codes | ForEach-Object { [char]$_ })
+    return Join-Path (Join-Path (Join-Path "G:\" $myDrive) "AHexaTrader_BACKUP") "RECTANGLE_ZONE_ANALYZER"
+}
+
+if ([string]::IsNullOrWhiteSpace($BackupRoot)) {
+    $BackupRoot = Default-BackupRoot
 }
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -29,10 +42,19 @@ $stamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
 $dest = Join-Path $BackupRoot $stamp
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
 
-$bundle = Join-Path $dest "RECTANGLE_ZONE_ANALYZER_$stamp.bundle"
-$zip = Join-Path $dest "RECTANGLE_ZONE_ANALYZER_$stamp.zip"
+$bundleName = "RECTANGLE_ZONE_ANALYZER_$stamp.bundle"
+$zipName = "RECTANGLE_ZONE_ANALYZER_$stamp.zip"
+$bundle = Join-Path $dest $bundleName
+$zip = Join-Path $dest $zipName
 $manifest = Join-Path $dest "MANIFEST.txt"
-$restore = Join-Path $dest "RESTORE_RU.txt"
+$restore = Join-Path $dest "RESTORE.txt"
+
+$stage = Join-Path $env:TEMP ("RZA_BACKUP_STAGE_" + [guid]::NewGuid().ToString("N"))
+$worktreeStage = Join-Path $stage "worktree"
+New-Item -ItemType Directory -Path $worktreeStage -Force | Out-Null
+
+$stageBundle = Join-Path $stage $bundleName
+$stageZip = Join-Path $stage $zipName
 
 Write-Host "============================================================"
 Write-Host "RZA DISASTER BACKUP"
@@ -41,32 +63,28 @@ Write-Host "BACKUP = $dest"
 Write-Host "============================================================"
 Write-Host
 
-# ---------------------------------------------------------------------------
-# 1. Full Git history: branches, tags and commits.
-# ---------------------------------------------------------------------------
-Write-Host "[1/4] Creating Git bundle..."
-& $Git -C $RepoRoot bundle create $bundle --all
-if ($LASTEXITCODE -ne 0) {
-    Fail "git bundle create failed"
-}
-
-& $Git bundle verify $bundle *> $null
-if ($LASTEXITCODE -ne 0) {
-    Fail "git bundle verify failed"
-}
-Write-Host "[PASS] Git bundle"
-
-# ---------------------------------------------------------------------------
-# 2. Snapshot of the current working tree.
-#    Includes tracked + untracked non-ignored files, therefore it also saves
-#    useful local edits that have not yet been committed.
-# ---------------------------------------------------------------------------
-Write-Host "[2/4] Creating current worktree ZIP..."
-
-$tempRoot = Join-Path $env:TEMP ("RZA_BACKUP_" + [guid]::NewGuid().ToString("N"))
-New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
-
 try {
+    # -----------------------------------------------------------------------
+    # 1. Create and verify the full Git bundle LOCALLY.
+    #    Git never writes lock files directly into the Google Drive mount.
+    # -----------------------------------------------------------------------
+    Write-Host "[1/4] Creating Git bundle locally..."
+    & $Git -C $RepoRoot bundle create $stageBundle --all
+    if ($LASTEXITCODE -ne 0) {
+        Fail "git bundle create failed"
+    }
+
+    & $Git bundle verify $stageBundle *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Fail "git bundle verify failed"
+    }
+    Write-Host "[PASS] Git bundle"
+
+    # -----------------------------------------------------------------------
+    # 2. Snapshot tracked + untracked non-ignored files locally.
+    # -----------------------------------------------------------------------
+    Write-Host "[2/4] Creating current worktree ZIP locally..."
+
     $files = @(
         & $Git -C $RepoRoot -c core.quotePath=false ls-files --cached --others --exclude-standard
     )
@@ -87,7 +105,7 @@ try {
             continue
         }
 
-        $target = Join-Path $tempRoot $normalized
+        $target = Join-Path $worktreeStage $normalized
         $targetDir = Split-Path -Parent $target
         if (-not (Test-Path -LiteralPath $targetDir)) {
             New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
@@ -101,39 +119,54 @@ try {
         Fail "worktree snapshot contains zero files"
     }
 
-    Compress-Archive -Path (Join-Path $tempRoot "*") -DestinationPath $zip -CompressionLevel Optimal -Force
-}
-finally {
-    if (Test-Path -LiteralPath $tempRoot) {
-        Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Compress-Archive -Path (Join-Path $worktreeStage "*") -DestinationPath $stageZip -CompressionLevel Optimal -Force
+
+    if (-not (Test-Path -LiteralPath $stageZip)) {
+        Fail "ZIP was not created"
     }
-}
+    Write-Host "[PASS] Worktree ZIP"
 
-if (-not (Test-Path -LiteralPath $zip)) {
-    Fail "ZIP was not created"
-}
-Write-Host "[PASS] Worktree ZIP"
+    # -----------------------------------------------------------------------
+    # 3. Compute integrity data, then copy finished artifacts to Google Drive.
+    # -----------------------------------------------------------------------
+    Write-Host "[3/4] Copying verified artifacts to Google Drive..."
 
-# ---------------------------------------------------------------------------
-# 3. Manifest with reproducibility and integrity data.
-# ---------------------------------------------------------------------------
-Write-Host "[3/4] Writing manifest..."
+    $commit = (& $Git -C $RepoRoot rev-parse HEAD).Trim()
+    $branch = (& $Git -C $RepoRoot branch --show-current).Trim()
+    $remote = (& $Git -C $RepoRoot remote get-url origin 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        $remote = ""
+    }
 
-$commit = (& $Git -C $RepoRoot rev-parse HEAD).Trim()
-$branch = (& $Git -C $RepoRoot branch --show-current).Trim()
-$remote = (& $Git -C $RepoRoot remote get-url origin 2>$null)
-if ($LASTEXITCODE -ne 0) {
-    $remote = ""
-}
-$statusLines = @(& $Git -C $RepoRoot status --short)
-$statusText = if ($statusLines.Count -eq 0) { "CLEAN" } else { $statusLines -join [Environment]::NewLine }
+    $statusLines = @(& $Git -C $RepoRoot status --short)
+    $statusText = if ($statusLines.Count -eq 0) {
+        "CLEAN"
+    } else {
+        $statusLines -join [Environment]::NewLine
+    }
 
-$bundleHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $bundle).Hash
-$zipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash
-$bundleBytes = (Get-Item -LiteralPath $bundle).Length
-$zipBytes = (Get-Item -LiteralPath $zip).Length
+    $bundleHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $stageBundle).Hash
+    $zipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $stageZip).Hash
+    $bundleBytes = (Get-Item -LiteralPath $stageBundle).Length
+    $zipBytes = (Get-Item -LiteralPath $stageZip).Length
 
-@"
+    Copy-Item -LiteralPath $stageBundle -Destination $bundle -Force
+    Copy-Item -LiteralPath $stageZip -Destination $zip -Force
+
+    if (-not (Test-Path -LiteralPath $bundle -PathType Leaf)) {
+        Fail "bundle copy to Google Drive failed"
+    }
+    if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) {
+        Fail "ZIP copy to Google Drive failed"
+    }
+    if ((Get-Item -LiteralPath $bundle).Length -ne $bundleBytes) {
+        Fail "bundle size mismatch after copy"
+    }
+    if ((Get-Item -LiteralPath $zip).Length -ne $zipBytes) {
+        Fail "ZIP size mismatch after copy"
+    }
+
+    @"
 RECTANGLE_ZONE_ANALYZER DISASTER BACKUP
 CREATED_LOCAL=$(Get-Date -Format "yyyy-MM-ddTHH:mm:ssK")
 REPO_ROOT=$RepoRoot
@@ -141,11 +174,11 @@ BRANCH=$branch
 COMMIT=$commit
 REMOTE=$remote
 
-BUNDLE_FILE=$(Split-Path -Leaf $bundle)
+BUNDLE_FILE=$bundleName
 BUNDLE_BYTES=$bundleBytes
 BUNDLE_SHA256=$bundleHash
 
-ZIP_FILE=$(Split-Path -Leaf $zip)
+ZIP_FILE=$zipName
 ZIP_BYTES=$zipBytes
 ZIP_SHA256=$zipHash
 
@@ -153,46 +186,51 @@ WORKTREE_STATUS:
 $statusText
 "@ | Set-Content -LiteralPath $manifest -Encoding UTF8
 
-@"
-ВОССТАНОВЛЕНИЕ RECTANGLE_ZONE_ANALYZER
+    @"
+RECTANGLE_ZONE_ANALYZER RESTORE GUIDE
 
-1. Полное восстановление Git-репозитория со всей историей:
+1. Full Git restore with complete history:
 
-   git clone "$(Split-Path -Leaf $bundle)" RECTANGLE_ZONE_ANALYZER_RESTORED
+   git clone "$bundleName" RECTANGLE_ZONE_ANALYZER_RESTORED
 
-2. ZIP содержит снимок текущего рабочего дерева на момент backup.
-   Он включает tracked и untracked non-ignored файлы.
+2. The ZIP contains the current worktree snapshot:
+   tracked files plus untracked non-ignored files.
 
-3. Проверка целостности:
+3. Integrity check:
 
-   Get-FileHash -Algorithm SHA256 ".\$(Split-Path -Leaf $bundle)"
-   Get-FileHash -Algorithm SHA256 ".\$(Split-Path -Leaf $zip)"
+   Get-FileHash -Algorithm SHA256 ".\$bundleName"
+   Get-FileHash -Algorithm SHA256 ".\$zipName"
 
-   Сравнить значения с MANIFEST.txt.
+   Compare both hashes with MANIFEST.txt.
 
-ВАЖНО:
-.bundle является основной аварийной капсулой Git.
-.zip сохраняет текущее состояние файлов, включая ещё не закоммиченные
-non-ignored файлы.
+The .bundle file is the primary Git disaster-recovery capsule.
+The .zip file preserves the current file state, including useful
+uncommitted non-ignored files.
 "@ | Set-Content -LiteralPath $restore -Encoding UTF8
 
-Write-Host "[PASS] Manifest"
+    Write-Host "[PASS] Google Drive copy + manifest"
 
-# ---------------------------------------------------------------------------
-# 4. Latest pointer.
-# ---------------------------------------------------------------------------
-Write-Host "[4/4] Updating LATEST.txt..."
-@"
+    # -----------------------------------------------------------------------
+    # 4. Update latest pointer.
+    # -----------------------------------------------------------------------
+    Write-Host "[4/4] Updating LATEST.txt..."
+    @"
 LATEST_BACKUP=$stamp
 PATH=$dest
 COMMIT=$commit
 "@ | Set-Content -LiteralPath (Join-Path $BackupRoot "LATEST.txt") -Encoding UTF8
 
-Write-Host "[PASS] Latest pointer"
-Write-Host
-Write-Host "============================================================"
-Write-Host "BACKUP PASS"
-Write-Host "BUNDLE_SHA256=$bundleHash"
-Write-Host "ZIP_SHA256=$zipHash"
-Write-Host "DEST=$dest"
-Write-Host "============================================================"
+    Write-Host "[PASS] Latest pointer"
+    Write-Host
+    Write-Host "============================================================"
+    Write-Host "BACKUP PASS"
+    Write-Host "BUNDLE_SHA256=$bundleHash"
+    Write-Host "ZIP_SHA256=$zipHash"
+    Write-Host "DEST=$dest"
+    Write-Host "============================================================"
+}
+finally {
+    if (Test-Path -LiteralPath $stage) {
+        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
