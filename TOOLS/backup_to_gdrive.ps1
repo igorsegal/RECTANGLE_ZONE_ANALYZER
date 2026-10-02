@@ -74,9 +74,30 @@ try {
         Fail "git bundle create failed"
     }
 
-    & $Git bundle verify $stageBundle *> $null
-    if ($LASTEXITCODE -ne 0) {
-        Fail "git bundle verify failed"
+    $verifyOut = Join-Path $stage "bundle_verify.stdout.txt"
+    $verifyErr = Join-Path $stage "bundle_verify.stderr.txt"
+    $verifyArgs = @(
+        "bundle",
+        "verify",
+        ('"' + $stageBundle + '"')
+    )
+    $verifyProcess = Start-Process -FilePath $Git `
+        -ArgumentList $verifyArgs `
+        -Wait `
+        -PassThru `
+        -NoNewWindow `
+        -RedirectStandardOutput $verifyOut `
+        -RedirectStandardError $verifyErr
+
+    if ($verifyProcess.ExitCode -ne 0) {
+        $details = ""
+        if (Test-Path -LiteralPath $verifyErr) {
+            $details = (Get-Content -LiteralPath $verifyErr -Raw).Trim()
+        }
+        if ([string]::IsNullOrWhiteSpace($details)) {
+            $details = "no diagnostic text"
+        }
+        Fail ("git bundle verify failed: " + $details)
     }
     Write-Host "[PASS] Git bundle"
 
