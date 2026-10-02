@@ -26,6 +26,7 @@ echo.
 "%CXX%" -std=c++17 -O2 -Wall -Wextra -Wpedantic ^
     "%ROOT%formation_detector.cpp" ^
     "%ROOT%01_selftest.cpp" ^
+    -static -static-libgcc -static-libstdc++ ^
     -o "%EXE%"
 
 if errorlevel 1 (
@@ -38,6 +39,8 @@ if errorlevel 1 (
 set "RC=%ERRORLEVEL%"
 
 if not "%RC%"=="0" (
+    echo.
+    echo BLOCK01 FAIL - RUNTIME RC=%RC%
     exit /b %RC%
 )
 
