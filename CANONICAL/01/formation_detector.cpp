@@ -49,6 +49,9 @@ static FormationEvent make_three_bar(
     event.intermediate_index = intermediate_index;
     event.zone_low = source.low;
     event.zone_high = source.high;
+
+    // Legacy diagnostic fields are retained for compatibility with old
+    // Block02 artifacts, but current research does not use progress.
     event.has_first_bar_progress = true;
 
     double raw_progress = 0.0;
@@ -80,9 +83,9 @@ std::optional<FormationEvent> detect_at(
         return std::nullopt;
     }
 
-    // ================================================================
-    // ENGULF_2
-    // ================================================================
+    // ABS_TRACK priority:
+    // 1) first test the latest two closed bars;
+    // 2) only if that test finds nothing, test the three-bar construction.
     if (confirmation_index >= 1) {
         const std::size_t source_index = confirmation_index - 1;
         const Bar& source = bars[source_index];
@@ -95,7 +98,10 @@ std::optional<FormationEvent> detect_at(
 
         if (bullish_complete) {
             return make_two_bar(
-                source, source_index, confirmation_index, Direction::BULLISH);
+                source,
+                source_index,
+                confirmation_index,
+                Direction::BULLISH);
         }
 
         const bool bearish_complete =
@@ -105,20 +111,17 @@ std::optional<FormationEvent> detect_at(
 
         if (bearish_complete) {
             return make_two_bar(
-                source, source_index, confirmation_index, Direction::BEARISH);
+                source,
+                source_index,
+                confirmation_index,
+                Direction::BEARISH);
         }
     }
 
-    // ================================================================
-    // ENGULF_3
-    //
-    // B0 = source противоположного направления.
-    // B1 = первый бар разворота; он НЕ завершил поглощение.
-    // B2 = второй бар того же направления; он завершил поглощение.
-    //
-    // Никакого требования к величине progress здесь нет:
-    // прогресс является ИССЛЕДУЕМЫМ признаком, а не фильтром.
-    // ================================================================
+    // Exact ABS_TRACK three-bar candidate logic.
+    // There is deliberately NO extra condition that the intermediate bar
+    // must still be inside the source body. If the same source produced an
+    // earlier live zone, the active-zone distance rule rejects the duplicate.
     if (confirmation_index >= 2) {
         const std::size_t source_index = confirmation_index - 2;
         const std::size_t intermediate_index = confirmation_index - 1;
@@ -131,7 +134,6 @@ std::optional<FormationEvent> detect_at(
             is_bearish(source) &&
             is_bullish(intermediate) &&
             is_bullish(confirm) &&
-            intermediate.close <= source.open &&
             confirm.close > source.open;
 
         if (bullish_three) {
@@ -148,7 +150,6 @@ std::optional<FormationEvent> detect_at(
             is_bullish(source) &&
             is_bearish(intermediate) &&
             is_bearish(confirm) &&
-            intermediate.close >= source.open &&
             confirm.close < source.open;
 
         if (bearish_three) {

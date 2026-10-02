@@ -3,12 +3,13 @@
 #include "../abs_track_policy.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <sstream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -19,8 +20,6 @@ namespace ap = rza::canonical::abs_track;
 namespace {
 
 constexpr std::int64_t DEV_CUTOFF_UTC = 1704067200LL;
-constexpr std::uint64_t SAMPLE_MODULUS = 64;
-constexpr std::uint64_t SAMPLE_FOLD = 0;
 
 enum class LifecycleResult {
     NO_OUTSIDE_BEFORE_CUTOFF,
@@ -32,29 +31,43 @@ enum class LifecycleResult {
     TOUCH_UNRESOLVED_AT_CUTOFF
 };
 
-const char* lifecycle_name(LifecycleResult r) {
-    switch (r) {
-        case LifecycleResult::NO_OUTSIDE_BEFORE_CUTOFF:
-            return "NO_OUTSIDE_BEFORE_CUTOFF";
-        case LifecycleResult::BROKEN_BEFORE_EXPECTED_DEPARTURE:
-            return "BROKEN_BEFORE_EXPECTED_DEPARTURE";
-        case LifecycleResult::NO_RETURN_BEFORE_CUTOFF:
-            return "NO_RETURN_BEFORE_CUTOFF";
-        case LifecycleResult::DIRECT_BREAKOUT_NO_CLOSE_TOUCH:
-            return "DIRECT_BREAKOUT_NO_CLOSE_TOUCH";
-        case LifecycleResult::REACTION_FIRST:
-            return "REACTION_FIRST";
-        case LifecycleResult::BREAKOUT_FIRST:
-            return "BREAKOUT_FIRST";
-        case LifecycleResult::TOUCH_UNRESOLVED_AT_CUTOFF:
-            return "TOUCH_UNRESOLVED_AT_CUTOFF";
-    }
-    return "UNKNOWN";
-}
+struct Stats {
+    std::uint64_t accepted = 0;
+    std::uint64_t reaction = 0;
+    std::uint64_t breakout = 0;
+    std::uint64_t no_outside = 0;
+    std::uint64_t broken_before_departure = 0;
+    std::uint64_t no_return = 0;
+    std::uint64_t direct_breakout = 0;
+    std::uint64_t unresolved = 0;
 
-const char* direction_name(Direction d) {
-    return d == Direction::BULLISH ? "BULLISH" : "BEARISH";
-}
+    std::uint64_t resolved() const {
+        return reaction + breakout;
+    }
+
+    std::uint64_t other() const {
+        return no_outside +
+               broken_before_departure +
+               no_return +
+               direct_breakout +
+               unresolved;
+    }
+};
+
+struct Totals {
+    std::uint64_t bin_files_scanned = 0;
+    std::uint64_t xfbar_files_passed = 0;
+    std::uint64_t xfbar_files_failed = 0;
+    std::uint64_t skipped_non_xfbar = 0;
+    std::uint64_t series_tested = 0;
+    std::uint64_t series_without_m5_atr = 0;
+
+    std::uint64_t candidate_formations = 0;
+    std::uint64_t accepted_zones = 0;
+    std::uint64_t rejected_gap = 0;
+
+    Stats lifecycle;
+};
 
 std::string csv_field(const std::string& s) {
     if (s.find_first_of(";\"\r\n") == std::string::npos) {
@@ -63,36 +76,79 @@ std::string csv_field(const std::string& s) {
 
     std::string out = "\"";
     for (char c : s) {
-        if (c == '"') out += "\"\"";
+        if (c == '\"') out += "\"\"";
         else out += c;
     }
-    out += '"';
+    out += '\"';
     return out;
 }
 
-std::uint64_t fnv1a64(const std::string& s) {
-    std::uint64_t h = 14695981039346656037ULL;
-    for (unsigned char c : s) {
-        h ^= static_cast<std::uint64_t>(c);
-        h *= 1099511628211ULL;
+double reaction_rate_pct(const Stats& s) {
+    if (s.resolved() == 0) {
+        return std::numeric_limits<double>::quiet_NaN();
     }
-    return h;
+
+    return 100.0 *
+        static_cast<double>(s.reaction) /
+        static_cast<double>(s.resolved());
 }
 
-std::string event_key(
-    const std::string& relative_file,
-    const XfbarData& data,
-    const FormationEvent& e)
-{
-    std::ostringstream oss;
-    oss
-        << relative_file << '|'
-        << data.symbol << '|'
-        << data.period_seconds << '|'
-        << data.bars[e.source_index].time << '|'
-        << data.bars[e.confirmation_index].time << '|'
-        << static_cast<int>(e.direction);
-    return oss.str();
+std::pair<double,double> wilson95_pct(const Stats& s) {
+    const double n = static_cast<double>(s.resolved());
+
+    if (n <= 0.0) {
+        return {
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN()
+        };
+    }
+
+    const double p =
+        static_cast<double>(s.reaction) / n;
+
+    const double z = 1.959963984540054;
+    const double z2 = z * z;
+    const double denom = 1.0 + z2 / n;
+
+    const double center =
+        (p + z2 / (2.0 * n)) / denom;
+
+    const double half =
+        z * std::sqrt(
+            (p * (1.0 - p) / n) +
+            (z2 / (4.0 * n * n))) /
+        denom;
+
+    return {
+        100.0 * std::max(0.0, center - half),
+        100.0 * std::min(1.0, center + half)
+    };
+}
+
+void count_result(Stats& s, LifecycleResult r) {
+    switch (r) {
+        case LifecycleResult::NO_OUTSIDE_BEFORE_CUTOFF:
+            ++s.no_outside;
+            break;
+        case LifecycleResult::BROKEN_BEFORE_EXPECTED_DEPARTURE:
+            ++s.broken_before_departure;
+            break;
+        case LifecycleResult::NO_RETURN_BEFORE_CUTOFF:
+            ++s.no_return;
+            break;
+        case LifecycleResult::DIRECT_BREAKOUT_NO_CLOSE_TOUCH:
+            ++s.direct_breakout;
+            break;
+        case LifecycleResult::REACTION_FIRST:
+            ++s.reaction;
+            break;
+        case LifecycleResult::BREAKOUT_FIRST:
+            ++s.breakout;
+            break;
+        case LifecycleResult::TOUCH_UNRESOLVED_AT_CUTOFF:
+            ++s.unresolved;
+            break;
+    }
 }
 
 std::vector<std::string> find_bin_files(const fs::path& root) {
@@ -127,15 +183,12 @@ std::vector<std::string> find_bin_files(const fs::path& root) {
 }
 
 std::size_t development_end_exclusive(const XfbarData& data) {
-    const std::int64_t latest_open_allowed =
-        DEV_CUTOFF_UTC - static_cast<std::int64_t>(data.period_seconds);
-
     const auto it = std::lower_bound(
         data.bars.begin(),
         data.bars.end(),
-        latest_open_allowed,
-        [](const Bar& bar, std::int64_t value) {
-            return bar.time < value;
+        DEV_CUTOFF_UTC,
+        [](const Bar& bar, std::int64_t cutoff) {
+            return bar.time < cutoff;
         });
 
     return static_cast<std::size_t>(
@@ -148,21 +201,30 @@ LifecycleResult evaluate_lifecycle(
     const FormationEvent& e,
     std::size_t dev_end)
 {
-    const std::size_t begin = e.confirmation_index + 1;
-    const double low = e.zone_low;
-    const double high = e.zone_high;
-    const bool bullish = e.direction == Direction::BULLISH;
+    const std::size_t begin =
+        e.confirmation_index + 1;
+
+    const bool bullish =
+        e.direction == Direction::BULLISH;
 
     const std::size_t first_out =
-        index.first_outside(begin, dev_end, low, high);
+        index.first_outside(
+            begin,
+            dev_end,
+            e.zone_low,
+            e.zone_high);
 
     if (first_out == ap::CloseIndex::npos()) {
         return LifecycleResult::NO_OUTSIDE_BEFORE_CUTOFF;
     }
 
-    const double first_close = data.bars[first_out].close;
+    const double first_close =
+        data.bars[first_out].close;
+
     const bool expected_side =
-        bullish ? (first_close > high) : (first_close < low);
+        bullish
+            ? first_close > e.zone_high
+            : first_close < e.zone_low;
 
     if (!expected_side) {
         return LifecycleResult::BROKEN_BEFORE_EXPECTED_DEPARTURE;
@@ -170,78 +232,53 @@ LifecycleResult evaluate_lifecycle(
 
     const std::size_t return_idx =
         bullish
-            ? index.first_le(first_out + 1, dev_end, high)
-            : index.first_ge(first_out + 1, dev_end, low);
+            ? index.first_le(
+                  first_out + 1,
+                  dev_end,
+                  e.zone_high)
+            : index.first_ge(
+                  first_out + 1,
+                  dev_end,
+                  e.zone_low);
 
     if (return_idx == ap::CloseIndex::npos()) {
         return LifecycleResult::NO_RETURN_BEFORE_CUTOFF;
     }
 
-    const double return_close = data.bars[return_idx].close;
-    const bool inside =
-        return_close >= low && return_close <= high;
+    const double return_close =
+        data.bars[return_idx].close;
 
-    if (!inside) {
+    if (return_close < e.zone_low ||
+        return_close > e.zone_high)
+    {
         return LifecycleResult::DIRECT_BREAKOUT_NO_CLOSE_TOUCH;
     }
 
-    const std::size_t out_after_touch =
-        index.first_outside(return_idx + 1, dev_end, low, high);
+    const std::size_t outcome =
+        index.first_outside(
+            return_idx + 1,
+            dev_end,
+            e.zone_low,
+            e.zone_high);
 
-    if (out_after_touch == ap::CloseIndex::npos()) {
+    if (outcome == ap::CloseIndex::npos()) {
         return LifecycleResult::TOUCH_UNRESOLVED_AT_CUTOFF;
     }
 
-    const double outcome_close = data.bars[out_after_touch].close;
+    const double outcome_close =
+        data.bars[outcome].close;
+
     const bool reaction_side =
-        bullish ? (outcome_close > high) : (outcome_close < low);
+        bullish
+            ? outcome_close > e.zone_high
+            : outcome_close < e.zone_low;
 
     return reaction_side
         ? LifecycleResult::REACTION_FIRST
         : LifecycleResult::BREAKOUT_FIRST;
 }
 
-struct Totals {
-    std::uint64_t files_found = 0;
-    std::uint64_t files_passed = 0;
-    std::uint64_t files_failed = 0;
-    std::uint64_t skipped_non_xfbar = 0;
-    std::uint64_t m5_atr_missing_files = 0;
-
-    std::uint64_t formations_dev = 0;
-    std::uint64_t accepted_zones_dev = 0;
-    std::uint64_t rejected_gap_dev = 0;
-    std::uint64_t selected = 0;
-
-    std::uint64_t no_outside = 0;
-    std::uint64_t broken_before_departure = 0;
-    std::uint64_t no_return = 0;
-    std::uint64_t direct_breakout = 0;
-    std::uint64_t reaction_first = 0;
-    std::uint64_t breakout_first = 0;
-    std::uint64_t touch_unresolved = 0;
-};
-
-void count_result(Totals& t, LifecycleResult r) {
-    switch (r) {
-        case LifecycleResult::NO_OUTSIDE_BEFORE_CUTOFF:
-            ++t.no_outside; break;
-        case LifecycleResult::BROKEN_BEFORE_EXPECTED_DEPARTURE:
-            ++t.broken_before_departure; break;
-        case LifecycleResult::NO_RETURN_BEFORE_CUTOFF:
-            ++t.no_return; break;
-        case LifecycleResult::DIRECT_BREAKOUT_NO_CLOSE_TOUCH:
-            ++t.direct_breakout; break;
-        case LifecycleResult::REACTION_FIRST:
-            ++t.reaction_first; break;
-        case LifecycleResult::BREAKOUT_FIRST:
-            ++t.breakout_first; break;
-        case LifecycleResult::TOUCH_UNRESOLVED_AT_CUTOFF:
-            ++t.touch_unresolved; break;
-    }
-}
-
-bool build_atr_lookup(
+bool load_symbol_m5_atr(
     const std::string& current_file,
     const XfbarData& data,
     ap::AtrLookup& out)
@@ -254,14 +291,17 @@ bool build_atr_lookup(
     }
 
     const fs::path m5 =
-        ap::find_m5_sibling(fs::path(current_file), data.symbol);
+        ap::find_m5_sibling(
+            fs::path(current_file),
+            data.symbol);
 
     if (m5.empty()) {
         out = ap::AtrLookup{};
         return false;
     }
 
-    const auto m5_data = read_xfbar(m5.string());
+    const auto m5_data =
+        read_xfbar(m5.string());
 
     if (!m5_data.success ||
         m5_data.period_seconds != p.atr_timeframe_seconds)
@@ -270,8 +310,30 @@ bool build_atr_lookup(
         return false;
     }
 
-    out.build(m5_data.bars, p.atr_period);
+    out.build(
+        m5_data.bars,
+        p.atr_period);
+
     return out.available();
+}
+
+void write_rate_fields(
+    std::ostream& out,
+    const Stats& s)
+{
+    if (s.resolved() == 0) {
+        out << ";;";
+        return;
+    }
+
+    const auto ci =
+        wilson95_pct(s);
+
+    out
+        << std::fixed << std::setprecision(9)
+        << reaction_rate_pct(s) << ';'
+        << ci.first << ';'
+        << ci.second;
 }
 
 } // namespace
@@ -289,72 +351,91 @@ int main(int argc, char** argv) {
 
     std::error_code ec;
 
-    if (!fs::exists(data_root, ec) || !fs::is_directory(data_root, ec)) {
-        std::cerr << "BLOCK03 FAIL - DATA_ROOT_NOT_FOUND\n";
+    if (!fs::exists(data_root, ec) ||
+        !fs::is_directory(data_root, ec))
+    {
+        std::cerr
+            << "BLOCK03 FAIL - DATA_ROOT_NOT_FOUND\n";
         return 2;
     }
 
     fs::create_directories(out_root, ec);
     if (ec) {
-        std::cerr << "BLOCK03 FAIL - CANNOT_CREATE_OUTDIR\n";
+        std::cerr
+            << "BLOCK03 FAIL - CANNOT_CREATE_OUTDIR\n";
         return 3;
     }
 
-    const fs::path events_path = out_root / "03_REACTION_SCREEN.csv";
-    const fs::path file_summary_path = out_root / "03_FILE_SUMMARY.csv";
-    const fs::path failures_path = out_root / "03_FAILURES.csv";
-    const fs::path summary_path = out_root / "03_SUMMARY.txt";
+    const fs::path instrument_path =
+        out_root / "03_INSTRUMENT_STATS.csv";
 
-    std::ofstream events(events_path, std::ios::binary);
-    std::ofstream file_summary(file_summary_path, std::ios::binary);
-    std::ofstream failures(failures_path, std::ios::binary);
+    const fs::path failures_path =
+        out_root / "03_FAILURES.csv";
 
-    if (!events || !file_summary || !failures) {
-        std::cerr << "BLOCK03 FAIL - CANNOT_OPEN_OUTPUTS\n";
+    const fs::path summary_path =
+        out_root / "03_SUMMARY.txt";
+
+    std::ofstream instrument(
+        instrument_path,
+        std::ios::binary);
+
+    std::ofstream failures(
+        failures_path,
+        std::ios::binary);
+
+    if (!instrument || !failures) {
+        std::cerr
+            << "BLOCK03 FAIL - CANNOT_OPEN_OUTPUTS\n";
         return 4;
     }
 
-    events
-        << "EventKey;File;Symbol;Timeframe;Direction;"
-        << "SourceTime;ConfirmBarTime;AvailableAt;ZoneLow;ZoneHigh;"
-        << "RequiredGap;DepartureTime;TouchTime;OutcomeTime;"
-        << "LifecycleResult\n";
-
-    file_summary
-        << "File;Symbol;Timeframe;DevFormations;AcceptedZones;"
-        << "RejectedGap;Selected;ReactionFirst;BreakoutFirst;OtherLifecycle;"
-        << "M5AtrAvailable\n";
+    instrument
+        << "Symbol;Timeframe;CandidateFormations;AcceptedZones;"
+        << "RejectedGap;Resolved;Reaction;Breakout;ReactionPct;"
+        << "CI95LowPct;CI95HighPct;OtherLifecycle;M5AtrAvailable\n";
 
     failures << "File;Reason\n";
 
-    std::cout << "============================================================\n";
-    std::cout << "RZA CANONICAL BLOCK 03 - ABS_TRACK ZONE POLICY\n";
-    std::cout << "DEV_CUTOFF=2024-01-01T00:00:00Z\n";
-    std::cout << "STREAM=ALL_CONFIRMED_ENGULF_RECTANGLES\n";
-    std::cout << "MIN_ZONE_HEIGHT_POINTS=225\n";
-    std::cout << "MIN_GAP=max(20 points, 0.30 * ATR(M5,14))\n";
-    std::cout << "DELETE=10 points beyond opposite boundary by close\n";
-    std::cout << "HISTORICAL_SPREAD_FLOOR=30 points\n";
-    std::cout << "SAMPLE=FNV1A64 %% 64 == 0 AFTER ZONE ACCEPTANCE\n";
-    std::cout << "============================================================\n";
+    const auto files =
+        find_bin_files(data_root);
 
-    const auto files = find_bin_files(data_root);
     if (files.empty()) {
-        std::cerr << "BLOCK03 FAIL - NO_BIN_FILES\n";
+        std::cerr
+            << "BLOCK03 FAIL - NO_BIN_FILES\n";
         return 5;
     }
 
     Totals total;
-    total.files_found = files.size();
+    total.bin_files_scanned = files.size();
 
-    for (std::size_t file_idx = 0; file_idx < files.size(); ++file_idx) {
-        const auto data = read_xfbar(files[file_idx]);
+    std::cout
+        << "============================================================\n"
+        << "RZA CANONICAL BLOCK 03 - FULL PER-INSTRUMENT TEST\n"
+        << "DEV_CUTOFF=2024-01-01T00:00:00Z\n"
+        << "TEST_UNIT=SYMBOL+TIMEFRAME\n"
+        << "FORMATION_LOGIC=ABS_TRACK_EXACT_PRIORITY\n"
+        << "ZONE_POLICY=ABS_TRACK_V2\n"
+        << "SAMPLING=OFF\n"
+        << "EVENT_CSV=OFF\n"
+        << "RESULT=REACTION_VS_BREAKOUT_ON_ALL_ACCEPTED_ZONES\n"
+        << "============================================================\n";
+
+    std::string cached_symbol;
+    ap::AtrLookup cached_atr;
+    bool cached_atr_available = false;
+
+    for (std::size_t file_idx = 0;
+         file_idx < files.size();
+         ++file_idx)
+    {
+        const auto data =
+            read_xfbar(files[file_idx]);
 
         if (!data.success) {
             if (data.error == "bad_magic") {
                 ++total.skipped_non_xfbar;
             } else {
-                ++total.files_failed;
+                ++total.xfbar_files_failed;
                 failures
                     << csv_field(files[file_idx]) << ';'
                     << csv_field(data.error) << '\n';
@@ -362,10 +443,10 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        ++total.files_passed;
+        ++total.xfbar_files_passed;
 
         if (!(data.point > 0.0)) {
-            ++total.files_failed;
+            ++total.xfbar_files_failed;
             failures
                 << csv_field(files[file_idx]) << ';'
                 << "nonpositive_point\n";
@@ -375,67 +456,58 @@ int main(int argc, char** argv) {
         const std::size_t dev_end =
             development_end_exclusive(data);
 
-        if (dev_end < 3) {
+        if (dev_end < 4) {
             continue;
         }
 
-        ap::AtrLookup atr;
-        const bool atr_available =
-            build_atr_lookup(files[file_idx], data, atr);
-
-        if (!atr_available) {
-            ++total.m5_atr_missing_files;
+        if (data.symbol != cached_symbol) {
+            cached_symbol = data.symbol;
+            cached_atr = ap::AtrLookup{};
+            cached_atr_available =
+                load_symbol_m5_atr(
+                    files[file_idx],
+                    data,
+                    cached_atr);
         }
 
-        const ap::CloseIndex index(data.bars);
+        if (!cached_atr_available) {
+            ++total.series_without_m5_atr;
+        }
+
+        const ap::CloseIndex close_index(
+            data.bars);
+
         ap::ActiveZones active;
 
-        std::uint64_t one_formations = 0;
-        std::uint64_t one_accepted = 0;
-        std::uint64_t one_rejected_gap = 0;
-        std::uint64_t one_selected = 0;
-        std::uint64_t one_reaction = 0;
-        std::uint64_t one_breakout = 0;
-        std::uint64_t one_other = 0;
-
-        std::string relative_file;
-        {
-            std::error_code rel_ec;
-            relative_file =
-                fs::relative(
-                    files[file_idx],
-                    data_root,
-                    rel_ec).generic_string();
-
-            if (rel_ec) {
-                relative_file =
-                    fs::path(files[file_idx]).filename().generic_string();
-            }
-        }
+        std::uint64_t candidates = 0;
+        std::uint64_t accepted = 0;
+        std::uint64_t rejected_gap = 0;
+        Stats stats;
 
         for (std::size_t confirm_idx = 0;
-             confirm_idx < dev_end;
+             confirm_idx + 1 < dev_end;
              ++confirm_idx)
         {
-            const std::int64_t available_at =
-                data.bars[confirm_idx].time + data.period_seconds;
-
-            if (available_at >= DEV_CUTOFF_UTC) {
-                break;
-            }
+            // Exact ABS_TRACK decision timing:
+            // a formation on confirm_idx becomes actionable at the opening
+            // time of the next real bar, not at synthetic time+period.
+            const std::int64_t decision_time =
+                data.bars[confirm_idx + 1].time;
 
             active.expire(confirm_idx);
 
             const auto e_opt =
-                detect_at(data.bars, confirm_idx);
+                detect_at(
+                    data.bars,
+                    confirm_idx);
 
             if (!e_opt.has_value()) {
                 continue;
             }
 
             FormationEvent e = *e_opt;
-            ++total.formations_dev;
-            ++one_formations;
+            ++candidates;
+            ++total.candidate_formations;
 
             const ap::ZoneBounds z =
                 ap::calculate_zone_bounds(
@@ -447,10 +519,13 @@ int main(int argc, char** argv) {
             e.zone_high = z.high;
 
             const double atr_value =
-                atr.at_decision(available_at);
+                cached_atr.at_decision(
+                    decision_time);
 
             const double req_gap =
-                ap::required_gap(data.point, atr_value);
+                ap::required_gap(
+                    data.point,
+                    atr_value);
 
             if (!active.can_accept(
                     e.direction,
@@ -458,14 +533,14 @@ int main(int argc, char** argv) {
                     e.zone_high,
                     req_gap))
             {
-                ++total.rejected_gap_dev;
-                ++one_rejected_gap;
+                ++rejected_gap;
+                ++total.rejected_gap;
                 continue;
             }
 
             const std::size_t break_idx =
                 ap::zone_break_index(
-                    index,
+                    close_index,
                     data.bars,
                     confirm_idx,
                     e.direction,
@@ -479,131 +554,42 @@ int main(int argc, char** argv) {
                 e.zone_high,
                 break_idx);
 
-            ++total.accepted_zones_dev;
-            ++one_accepted;
-
-            const std::string key =
-                event_key(relative_file, data, e);
-
-            if ((fnv1a64(key) % SAMPLE_MODULUS) != SAMPLE_FOLD) {
-                continue;
-            }
-
-            ++total.selected;
-            ++one_selected;
+            ++accepted;
+            ++stats.accepted;
+            ++total.accepted_zones;
+            ++total.lifecycle.accepted;
 
             const LifecycleResult result =
                 evaluate_lifecycle(
                     data,
-                    index,
+                    close_index,
                     e,
                     dev_end);
 
-            count_result(total, result);
-
-            if (result == LifecycleResult::REACTION_FIRST) {
-                ++one_reaction;
-            } else if (result == LifecycleResult::BREAKOUT_FIRST) {
-                ++one_breakout;
-            } else {
-                ++one_other;
-            }
-
-            std::size_t departure = ap::CloseIndex::npos();
-            std::size_t touch = ap::CloseIndex::npos();
-            std::size_t outcome = ap::CloseIndex::npos();
-
-            const bool bullish =
-                e.direction == Direction::BULLISH;
-
-            departure =
-                index.first_outside(
-                    e.confirmation_index + 1,
-                    dev_end,
-                    e.zone_low,
-                    e.zone_high);
-
-            if (departure != ap::CloseIndex::npos()) {
-                const double dc = data.bars[departure].close;
-                const bool expected =
-                    bullish
-                        ? dc > e.zone_high
-                        : dc < e.zone_low;
-
-                if (expected) {
-                    const std::size_t r =
-                        bullish
-                            ? index.first_le(
-                                  departure + 1,
-                                  dev_end,
-                                  e.zone_high)
-                            : index.first_ge(
-                                  departure + 1,
-                                  dev_end,
-                                  e.zone_low);
-
-                    if (r != ap::CloseIndex::npos()) {
-                        const double rc = data.bars[r].close;
-
-                        if (rc >= e.zone_low &&
-                            rc <= e.zone_high)
-                        {
-                            touch = r;
-                            outcome =
-                                index.first_outside(
-                                    touch + 1,
-                                    dev_end,
-                                    e.zone_low,
-                                    e.zone_high);
-                        }
-                    }
-                }
-            }
-
-            events
-                << csv_field(key) << ';'
-                << csv_field(relative_file) << ';'
-                << csv_field(data.symbol) << ';'
-                << timeframe_name(data.period_seconds) << ';'
-                << direction_name(e.direction) << ';'
-                << data.bars[e.source_index].time << ';'
-                << data.bars[e.confirmation_index].time << ';'
-                << available_at << ';'
-                << std::setprecision(17)
-                << e.zone_low << ';'
-                << e.zone_high << ';'
-                << req_gap << ';';
-
-            if (departure != ap::CloseIndex::npos()) {
-                events << data.bars[departure].time;
-            }
-            events << ';';
-
-            if (touch != ap::CloseIndex::npos()) {
-                events << data.bars[touch].time;
-            }
-            events << ';';
-
-            if (outcome != ap::CloseIndex::npos()) {
-                events << data.bars[outcome].time;
-            }
-            events << ';';
-
-            events << lifecycle_name(result) << '\n';
+            count_result(stats, result);
+            count_result(total.lifecycle, result);
         }
 
-        file_summary
-            << csv_field(relative_file) << ';'
+        ++total.series_tested;
+
+        instrument
             << csv_field(data.symbol) << ';'
             << timeframe_name(data.period_seconds) << ';'
-            << one_formations << ';'
-            << one_accepted << ';'
-            << one_rejected_gap << ';'
-            << one_selected << ';'
-            << one_reaction << ';'
-            << one_breakout << ';'
-            << one_other << ';'
-            << (atr_available ? 1 : 0)
+            << candidates << ';'
+            << accepted << ';'
+            << rejected_gap << ';'
+            << stats.resolved() << ';'
+            << stats.reaction << ';'
+            << stats.breakout << ';';
+
+        write_rate_fields(
+            instrument,
+            stats);
+
+        instrument
+            << ';'
+            << stats.other() << ';'
+            << (cached_atr_available ? 1 : 0)
             << '\n';
 
         if ((file_idx + 1) % 25 == 0 ||
@@ -613,89 +599,154 @@ int main(int argc, char** argv) {
                 << '[' << (file_idx + 1)
                 << '/' << files.size() << "] "
                 << data.symbol << '_'
-                << timeframe_name(data.period_seconds)
-                << " accepted=" << total.accepted_zones_dev
-                << " rejected_gap=" << total.rejected_gap_dev
-                << " selected=" << total.selected
-                << " reaction=" << total.reaction_first
-                << " breakout=" << total.breakout_first
-                << " failed=" << total.files_failed
+                << timeframe_name(
+                    data.period_seconds)
+                << " accepted="
+                << accepted
+                << " resolved="
+                << stats.resolved()
+                << " reaction="
+                << stats.reaction
+                << " breakout="
+                << stats.breakout
                 << '\n';
         }
     }
 
-    events.close();
-    file_summary.close();
+    instrument.close();
     failures.close();
 
-    std::ofstream summary(summary_path, std::ios::binary);
+    std::ofstream summary(
+        summary_path,
+        std::ios::binary);
+
     if (!summary) {
-        std::cerr << "BLOCK03 FAIL - CANNOT_WRITE_SUMMARY\n";
+        std::cerr
+            << "BLOCK03 FAIL - CANNOT_WRITE_SUMMARY\n";
         return 6;
     }
 
-    summary << "RZA CANONICAL BLOCK 03 - ABS_TRACK ZONE POLICY\n";
-    summary << "DEV_CUTOFF_UTC=2024-01-01T00:00:00Z\n";
-    summary << "STREAM=ALL_CONFIRMED_ENGULF_RECTANGLES\n";
-    summary << "FORMATION_TYPE_USED_FOR_SPLIT=0\n";
-    summary << "PROGRESS_USED=0\n";
-    summary << "MIN_ZONE_HEIGHT_POINTS=225\n";
-    summary << "MIN_GAP_POINTS=20\n";
-    summary << "MIN_GAP_ATR=0.30\n";
-    summary << "DISTANCE_ATR_TIMEFRAME=M5\n";
-    summary << "DISTANCE_ATR_PERIOD=14\n";
-    summary << "DELETION_THRESHOLD_POINTS=10\n";
-    summary << "HISTORICAL_SPREAD_POINTS=30\n";
-    summary << "SAMPLE_MODULUS=" << SAMPLE_MODULUS << "\n";
-    summary << "SAMPLE_FOLD=" << SAMPLE_FOLD << "\n";
-    summary << "FILES_FOUND=" << total.files_found << "\n";
-    summary << "FILES_PASSED=" << total.files_passed << "\n";
-    summary << "FILES_FAILED=" << total.files_failed << "\n";
-    summary << "SKIPPED_NON_XFBAR=" << total.skipped_non_xfbar << "\n";
-    summary << "M5_ATR_MISSING_FILES=" << total.m5_atr_missing_files << "\n";
-    summary << "FORMATIONS_DEV=" << total.formations_dev << "\n";
-    summary << "ACCEPTED_ZONES_DEV=" << total.accepted_zones_dev << "\n";
-    summary << "REJECTED_GAP_DEV=" << total.rejected_gap_dev << "\n";
-    summary << "SELECTED=" << total.selected << "\n";
-    summary << "NO_OUTSIDE_BEFORE_CUTOFF=" << total.no_outside << "\n";
-    summary << "BROKEN_BEFORE_EXPECTED_DEPARTURE="
-            << total.broken_before_departure << "\n";
-    summary << "NO_RETURN_BEFORE_CUTOFF=" << total.no_return << "\n";
-    summary << "DIRECT_BREAKOUT_NO_CLOSE_TOUCH="
-            << total.direct_breakout << "\n";
-    summary << "REACTION_FIRST=" << total.reaction_first << "\n";
-    summary << "BREAKOUT_FIRST=" << total.breakout_first << "\n";
-    summary << "TOUCH_UNRESOLVED_AT_CUTOFF="
-            << total.touch_unresolved << "\n";
+    const auto overall_ci =
+        wilson95_pct(total.lifecycle);
+
+    summary
+        << "RZA CANONICAL BLOCK 03 - FULL PER-INSTRUMENT TEST\n"
+        << "DEV_CUTOFF_UTC=2024-01-01T00:00:00Z\n"
+        << "TEST_UNIT=SYMBOL+TIMEFRAME\n"
+        << "FORMATION_LOGIC=ABS_TRACK_EXACT_PRIORITY\n"
+        << "ZONE_POLICY=ABS_TRACK_V2\n"
+        << "SAMPLING=OFF\n"
+        << "EVENT_CSV=OFF\n"
+        << "FORMATION_TYPE_USED_FOR_SPLIT=0\n"
+        << "PROGRESS_USED=0\n"
+        << "MIN_ZONE_HEIGHT_POINTS=225\n"
+        << "MIN_GAP_POINTS=20\n"
+        << "MIN_GAP_ATR=0.30\n"
+        << "DISTANCE_ATR_TIMEFRAME=M5\n"
+        << "DISTANCE_ATR_PERIOD=14\n"
+        << "DELETION_THRESHOLD_POINTS=10\n"
+        << "HISTORICAL_SPREAD_POINTS=30\n"
+        << "BIN_FILES_SCANNED="
+        << total.bin_files_scanned << '\n'
+        << "XFBAR_FILES_PASSED="
+        << total.xfbar_files_passed << '\n'
+        << "XFBAR_FILES_FAILED="
+        << total.xfbar_files_failed << '\n'
+        << "SKIPPED_NON_XFBAR="
+        << total.skipped_non_xfbar << '\n'
+        << "SERIES_TESTED="
+        << total.series_tested << '\n'
+        << "SERIES_WITHOUT_M5_ATR="
+        << total.series_without_m5_atr << '\n'
+        << "CANDIDATE_FORMATIONS="
+        << total.candidate_formations << '\n'
+        << "ACCEPTED_ZONES="
+        << total.accepted_zones << '\n'
+        << "REJECTED_GAP="
+        << total.rejected_gap << '\n'
+        << "RESOLVED_TOUCH_OUTCOMES="
+        << total.lifecycle.resolved() << '\n'
+        << "REACTION_FIRST="
+        << total.lifecycle.reaction << '\n'
+        << "BREAKOUT_FIRST="
+        << total.lifecycle.breakout << '\n'
+        << "OTHER_LIFECYCLE="
+        << total.lifecycle.other() << '\n';
+
+    if (total.lifecycle.resolved() > 0) {
+        summary
+            << std::fixed << std::setprecision(9)
+            << "REACTION_PCT="
+            << reaction_rate_pct(total.lifecycle) << '\n'
+            << "REACTION_CI95_LOW_PCT="
+            << overall_ci.first << '\n'
+            << "REACTION_CI95_HIGH_PCT="
+            << overall_ci.second << '\n';
+    } else {
+        summary
+            << "REACTION_PCT=NA\n"
+            << "REACTION_CI95_LOW_PCT=NA\n"
+            << "REACTION_CI95_HIGH_PCT=NA\n";
+    }
+
+    summary
+        << "\nCONTRACT:\n"
+        << "- 3149-style counts are database file metadata, not event counts.\n"
+        << "- Every symbol+timeframe series is tested separately.\n"
+        << "- Only zones accepted by the ABS_TRACK_v2 bounds/gap/deletion policy enter the reaction test.\n"
+        << "- All accepted development zones are evaluated; there is no 1/64 sample.\n"
+        << "- Instrument statistics are written to 03_INSTRUMENT_STATS.csv.\n"
+        << "- The old 61.01% result is obsolete and must not be used.\n"
+        << "- 2024+ remains untouched for final OOS.\n";
+
     summary.close();
 
-    std::cout << "------------------------------------------------------------\n";
-    std::cout << "FILES_FOUND=" << total.files_found << "\n";
-    std::cout << "FILES_PASSED=" << total.files_passed << "\n";
-    std::cout << "FILES_FAILED=" << total.files_failed << "\n";
-    std::cout << "SKIPPED_NON_XFBAR=" << total.skipped_non_xfbar << "\n";
-    std::cout << "M5_ATR_MISSING_FILES="
-              << total.m5_atr_missing_files << "\n";
-    std::cout << "FORMATIONS_DEV=" << total.formations_dev << "\n";
-    std::cout << "ACCEPTED_ZONES_DEV="
-              << total.accepted_zones_dev << "\n";
-    std::cout << "REJECTED_GAP_DEV="
-              << total.rejected_gap_dev << "\n";
-    std::cout << "SELECTED=" << total.selected << "\n";
-    std::cout << "REACTION_FIRST=" << total.reaction_first << "\n";
-    std::cout << "BREAKOUT_FIRST=" << total.breakout_first << "\n";
-    std::cout << "SUMMARY=" << summary_path.string() << "\n";
+    std::cout
+        << "------------------------------------------------------------\n"
+        << "BIN_FILES_SCANNED="
+        << total.bin_files_scanned << '\n'
+        << "SERIES_TESTED="
+        << total.series_tested << '\n'
+        << "CANDIDATE_FORMATIONS="
+        << total.candidate_formations << '\n'
+        << "ACCEPTED_ZONES="
+        << total.accepted_zones << '\n'
+        << "REJECTED_GAP="
+        << total.rejected_gap << '\n'
+        << "RESOLVED_TOUCH_OUTCOMES="
+        << total.lifecycle.resolved() << '\n'
+        << "REACTION_FIRST="
+        << total.lifecycle.reaction << '\n'
+        << "BREAKOUT_FIRST="
+        << total.lifecycle.breakout << '\n';
 
-    if (total.files_failed != 0) {
-        std::cout << "BLOCK03 FAIL - INVALID_XFBAR_FILES="
-                  << total.files_failed << "\n";
+    if (total.lifecycle.resolved() > 0) {
+        std::cout
+            << std::fixed << std::setprecision(6)
+            << "REACTION_PCT="
+            << reaction_rate_pct(total.lifecycle)
+            << '\n';
+    }
+
+    std::cout
+        << "INSTRUMENT_STATS="
+        << instrument_path.string() << '\n'
+        << "SUMMARY="
+        << summary_path.string() << '\n';
+
+    if (total.xfbar_files_failed != 0) {
+        std::cout
+            << "BLOCK03 FAIL - INVALID_XFBAR_FILES="
+            << total.xfbar_files_failed << '\n';
         return 7;
     }
 
-    if (total.accepted_zones_dev == 0 ||
-        total.selected == 0)
+    if (total.series_tested == 0 ||
+        total.accepted_zones == 0 ||
+        total.lifecycle.resolved() == 0)
     {
-        std::cout << "BLOCK03 FAIL - ZERO_ACCEPTED_OR_SELECTED\n";
+        std::cout
+            << "BLOCK03 FAIL - ZERO_TESTABLE_RESULT\n";
         return 8;
     }
 

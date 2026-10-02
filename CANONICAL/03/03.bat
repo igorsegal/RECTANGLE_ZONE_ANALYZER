@@ -9,6 +9,10 @@ set "CXX=D:\AHexaTrader\COMPILER\bin\g++.exe"
 
 if not exist "%OUTDIR%" mkdir "%OUTDIR%"
 
+rem Remove obsolete outputs from the sampled/old-definition Block03.
+del /q "%OUTDIR%\03_REACTION_SCREEN.csv" 2>nul
+del /q "%OUTDIR%\03_FILE_SUMMARY.csv" 2>nul
+
 if not exist "%CXX%" (
     where g++ >nul 2>nul
     if errorlevel 1 (
@@ -20,7 +24,7 @@ if not exist "%CXX%" (
 
 echo ============================================
 echo RZA CANONICAL BLOCK 03
-echo CAUSAL REACTION SCREEN
+echo FULL PER-INSTRUMENT ABS_TRACK TEST
 echo ============================================
 echo.
 

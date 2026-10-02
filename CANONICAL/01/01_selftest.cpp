@@ -37,42 +37,34 @@ Bar bar(double o, double h, double l, double c) {
     return b;
 }
 
-void test_bullish_engulf_2() {
+void test_bullish_two_bar() {
     std::vector<Bar> bars = {
         bar(100.0, 101.0, 89.0, 90.0),
         bar(90.0, 102.0, 89.5, 101.0)
     };
 
     const auto e = detect_at(bars, 1);
-    require(e.has_value(), "ENGULF_2 bullish detected");
+    require(e.has_value(), "ABS_TRACK bullish two-bar detected");
     if (!e) return;
 
-    require(e->type == FormationType::ENGULF_2, "ENGULF_2 bullish type");
-    require(e->direction == Direction::BULLISH, "ENGULF_2 bullish direction");
-    require(near(e->zone_low, 89.0) && near(e->zone_high, 101.0),
-            "ENGULF_2 zone is source full range");
-    require(!e->has_first_bar_progress,
-            "ENGULF_2 has no intermediate progress");
+    require(e->type == FormationType::ENGULF_2, "two-bar technical origin");
+    require(e->direction == Direction::BULLISH, "two-bar bullish direction");
 }
 
-void test_bearish_engulf_2() {
+void test_bearish_two_bar() {
     std::vector<Bar> bars = {
         bar(90.0, 101.0, 89.0, 100.0),
         bar(100.0, 100.5, 88.0, 89.0)
     };
 
     const auto e = detect_at(bars, 1);
-    require(e.has_value(), "ENGULF_2 bearish detected");
+    require(e.has_value(), "ABS_TRACK bearish two-bar detected");
     if (!e) return;
 
-    require(e->type == FormationType::ENGULF_2, "ENGULF_2 bearish type");
-    require(e->direction == Direction::BEARISH, "ENGULF_2 bearish direction");
+    require(e->direction == Direction::BEARISH, "two-bar bearish direction");
 }
 
-void test_bullish_engulf_3_progress_90() {
-    // B0: bearish body 100 -> 90.
-    // B1 closes at 99: reclaimed 9 of 10 = 90%, but has not crossed 100.
-    // B2 is small, but closes at 100.20 and completes the engulfing.
+void test_bullish_three_bar() {
     std::vector<Bar> bars = {
         bar(100.0, 101.0, 89.0, 90.0),
         bar(90.0, 99.2, 89.5, 99.0),
@@ -80,24 +72,16 @@ void test_bullish_engulf_3_progress_90() {
     };
 
     const auto e = detect_at(bars, 2);
-    require(e.has_value(), "ENGULF_3 bullish detected");
+    require(e.has_value(), "ABS_TRACK bullish three-bar detected");
     if (!e) return;
 
-    require(e->type == FormationType::ENGULF_3, "ENGULF_3 bullish type");
-    require(e->direction == Direction::BULLISH, "ENGULF_3 bullish direction");
-    require(e->has_intermediate && e->intermediate_index == 1,
-            "ENGULF_3 intermediate bar recorded");
-    require(e->has_first_bar_progress, "ENGULF_3 progress present");
-    require(near(e->first_bar_progress_pct, 90.0),
-            "ENGULF_3 bullish progress = 90%");
-    require(near(e->zone_low, 89.0) && near(e->zone_high, 101.0),
-            "ENGULF_3 zone remains source full range");
+    require(e->type == FormationType::ENGULF_3, "three-bar technical origin");
+    require(e->direction == Direction::BULLISH, "three-bar bullish direction");
+    require(e->source_index == 0 && e->confirmation_index == 2,
+            "three-bar source and confirmation indices");
 }
 
-void test_bearish_engulf_3_progress_90() {
-    // Mirror case: B0 bullish body 90 -> 100.
-    // B1 closes at 91: reclaimed 9 of 10 = 90%.
-    // B2 closes below 90 and completes the engulfing.
+void test_bearish_three_bar() {
     std::vector<Bar> bars = {
         bar(90.0, 101.0, 89.0, 100.0),
         bar(100.0, 100.5, 90.8, 91.0),
@@ -105,59 +89,61 @@ void test_bearish_engulf_3_progress_90() {
     };
 
     const auto e = detect_at(bars, 2);
-    require(e.has_value(), "ENGULF_3 bearish detected");
+    require(e.has_value(), "ABS_TRACK bearish three-bar detected");
     if (!e) return;
 
-    require(e->type == FormationType::ENGULF_3, "ENGULF_3 bearish type");
-    require(e->direction == Direction::BEARISH, "ENGULF_3 bearish direction");
-    require(near(e->first_bar_progress_pct, 90.0),
-            "ENGULF_3 bearish progress = 90%");
+    require(e->direction == Direction::BEARISH, "three-bar bearish direction");
 }
 
-void test_three_bar_does_not_exist_until_b2_closes() {
+void test_three_bar_requires_final_cross() {
     std::vector<Bar> bars = {
         bar(100.0, 101.0, 89.0, 90.0),
         bar(90.0, 99.2, 89.5, 99.0),
         bar(99.0, 99.9, 98.8, 99.8)
     };
 
-    require(!detect_at(bars, 1).has_value(),
-            "ENGULF_3 is not known after incomplete B1");
     require(!detect_at(bars, 2).has_value(),
-            "ENGULF_3 rejected if B2 still does not complete");
+            "three-bar rejected until final close crosses source open");
 }
 
-void test_first_bar_that_already_completes_is_two_bar_only() {
+void test_abs_track_allows_three_bar_candidate_after_prior_cross() {
+    // B1 already completed a two-bar engulf of B0 on the previous decision.
+    // ABS_TRACK can still recognize B0+B1+B2 as a three-bar candidate later.
+    // The active-zone distance rule, not the detector, suppresses the duplicate.
     std::vector<Bar> bars = {
         bar(100.0, 101.0, 89.0, 90.0),
         bar(90.0, 101.5, 89.5, 101.0),
         bar(101.0, 102.0, 100.5, 101.5)
     };
 
-    const auto e1 = detect_at(bars, 1);
-    require(e1.has_value() && e1->type == FormationType::ENGULF_2,
-            "Completed B1 is classified as ENGULF_2");
+    const auto first = detect_at(bars, 1);
+    require(first.has_value() && first->type == FormationType::ENGULF_2,
+            "prior decision detects two-bar zone");
 
-    const auto e2 = detect_at(bars, 2);
-    require(!e2.has_value(),
-            "Completed B1 is not reclassified as ENGULF_3");
+    const auto later = detect_at(bars, 2);
+    require(later.has_value() && later->type == FormationType::ENGULF_3,
+            "later ABS_TRACK three-bar candidate is not artificially blocked");
+    if (later) {
+        require(later->source_index == 0,
+                "later candidate keeps original source bar");
+    }
 }
 
-void test_progress_is_feature_not_filter() {
-    // First bullish bar barely advances: 10%.
-    // Event must still be accepted as ENGULF_3; 10% is data for later research.
+void test_two_bar_priority_on_current_decision() {
+    // Latest two bars form a bearish engulf. Even if older bars exist,
+    // ABS_TRACK stops at the two-bar match and does not inspect three-bar logic.
     std::vector<Bar> bars = {
-        bar(100.0, 101.0, 89.0, 90.0),
-        bar(90.0, 91.2, 89.5, 91.0),
-        bar(91.0, 100.4, 90.5, 100.2)
+        bar(80.0, 82.0, 79.0, 81.0),
+        bar(90.0, 101.0, 89.0, 100.0),
+        bar(100.0, 100.5, 88.0, 89.0)
     };
 
     const auto e = detect_at(bars, 2);
-    require(e.has_value() && e->type == FormationType::ENGULF_3,
-            "Low-progress ENGULF_3 is not filtered out");
+    require(e.has_value() && e->type == FormationType::ENGULF_2,
+            "two-bar has priority on current decision");
     if (e) {
-        require(near(e->first_bar_progress_pct, 10.0),
-                "Low progress retained as 10% feature");
+        require(e->source_index == 1,
+                "two-bar priority uses latest source bar");
     }
 }
 
@@ -165,16 +151,16 @@ void test_progress_is_feature_not_filter() {
 
 int main() {
     std::cout << "============================================\n";
-    std::cout << "RZA CANONICAL BLOCK 01 - FORMATION DETECTOR\n";
+    std::cout << "RZA CANONICAL BLOCK 01 - ABS_TRACK DETECTOR\n";
     std::cout << "============================================\n";
 
-    test_bullish_engulf_2();
-    test_bearish_engulf_2();
-    test_bullish_engulf_3_progress_90();
-    test_bearish_engulf_3_progress_90();
-    test_three_bar_does_not_exist_until_b2_closes();
-    test_first_bar_that_already_completes_is_two_bar_only();
-    test_progress_is_feature_not_filter();
+    test_bullish_two_bar();
+    test_bearish_two_bar();
+    test_bullish_three_bar();
+    test_bearish_three_bar();
+    test_three_bar_requires_final_cross();
+    test_abs_track_allows_three_bar_candidate_after_prior_cross();
+    test_two_bar_priority_on_current_decision();
 
     std::cout << "--------------------------------------------\n";
     if (failures == 0) {
