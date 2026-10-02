@@ -5,10 +5,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <string>
 #include <vector>
@@ -19,7 +21,7 @@ namespace ap = rza::canonical::abs_track;
 
 namespace {
 
-constexpr std::int64_t OOS_START_UTC = 1704067200LL;
+constexpr std::int64_t OOS_START_UTC = 1704067200LL; // 2024-01-01T00:00:00Z
 
 enum class LifecycleResult {
     NO_OUTSIDE_BEFORE_END,
@@ -32,48 +34,74 @@ enum class LifecycleResult {
 };
 
 struct Stats {
-    std::uint64_t rows = 0;
+    std::uint64_t accepted = 0;
     std::uint64_t reaction = 0;
     std::uint64_t breakout = 0;
-    std::uint64_t other = 0;
-
-    std::uint64_t resolved() const {
-        return reaction + breakout;
-    }
-};
-
-struct Totals {
-    std::uint64_t files_found = 0;
-    std::uint64_t files_passed = 0;
-    std::uint64_t files_failed = 0;
-    std::uint64_t skipped_non_xfbar = 0;
-    std::uint64_t m5_atr_missing_files = 0;
-
-    std::uint64_t formations_total_replayed = 0;
-    std::uint64_t accepted_total_replayed = 0;
-    std::uint64_t rejected_gap_total = 0;
-
-    std::uint64_t formations_oos = 0;
-    std::uint64_t accepted_oos = 0;
-    std::uint64_t rejected_gap_oos = 0;
-
     std::uint64_t no_outside = 0;
     std::uint64_t broken_before_departure = 0;
     std::uint64_t no_return = 0;
     std::uint64_t direct_breakout = 0;
-    std::uint64_t touch_unresolved = 0;
+    std::uint64_t unresolved = 0;
 
-    Stats overall;
-    std::map<std::string, Stats> by_direction;
-    std::map<std::string, Stats> by_timeframe;
+    std::uint64_t resolved() const {
+        return reaction + breakout;
+    }
+
+    std::uint64_t other() const {
+        return no_outside +
+               broken_before_departure +
+               no_return +
+               direct_breakout +
+               unresolved;
+    }
 };
 
-const char* direction_name(Direction d) {
-    return d == Direction::BULLISH ? "BULLISH" : "BEARISH";
+struct Totals {
+    std::uint64_t bin_files_scanned = 0;
+    std::uint64_t xfbar_files_passed = 0;
+    std::uint64_t xfbar_files_failed = 0;
+    std::uint64_t skipped_non_xfbar = 0;
+
+    std::uint64_t series_replayed = 0;
+    std::uint64_t series_with_oos = 0;
+    std::uint64_t series_excluded_no_m5_atr = 0;
+    std::uint64_t duplicate_identical_series = 0;
+    std::uint64_t duplicate_conflict_series = 0;
+
+    std::uint64_t candidate_total = 0;
+    std::uint64_t accepted_total = 0;
+    std::uint64_t rejected_gap_total = 0;
+
+    std::uint64_t candidate_oos = 0;
+    std::uint64_t accepted_oos = 0;
+    std::uint64_t rejected_gap_oos = 0;
+
+    Stats oos;
+};
+
+struct SeenSeries {
+    std::uint64_t fingerprint = 0;
+    std::string file;
+};
+
+std::string csv_field(const std::string& s) {
+    if (s.find_first_of(";\"\r\n") == std::string::npos) {
+        return s;
+    }
+
+    std::string out = "\"";
+    for (char c : s) {
+        if (c == '"') out += "\"\"";
+        else out += c;
+    }
+    out += '"';
+    return out;
 }
 
 double reaction_rate_pct(const Stats& s) {
-    if (s.resolved() == 0) return 0.0;
+    if (s.resolved() == 0) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
 
     return 100.0 *
         static_cast<double>(s.reaction) /
@@ -81,15 +109,23 @@ double reaction_rate_pct(const Stats& s) {
 }
 
 std::pair<double,double> wilson95_pct(const Stats& s) {
-    const double n = static_cast<double>(s.resolved());
-    if (n <= 0.0) return {0.0, 0.0};
+    const double n =
+        static_cast<double>(s.resolved());
+
+    if (n <= 0.0) {
+        return {
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::quiet_NaN()
+        };
+    }
 
     const double p =
         static_cast<double>(s.reaction) / n;
+
     const double z = 1.959963984540054;
     const double z2 = z * z;
-
     const double denom = 1.0 + z2 / n;
+
     const double center =
         (p + z2 / (2.0 * n)) / denom;
 
@@ -105,32 +141,28 @@ std::pair<double,double> wilson95_pct(const Stats& s) {
     };
 }
 
-void update_stats(Stats& s, LifecycleResult r) {
-    ++s.rows;
-
-    if (r == LifecycleResult::REACTION_FIRST) {
-        ++s.reaction;
-    } else if (r == LifecycleResult::BREAKOUT_FIRST) {
-        ++s.breakout;
-    } else {
-        ++s.other;
-    }
-}
-
-void count_lifecycle(Totals& t, LifecycleResult r) {
+void count_result(Stats& s, LifecycleResult r) {
     switch (r) {
         case LifecycleResult::NO_OUTSIDE_BEFORE_END:
-            ++t.no_outside; break;
+            ++s.no_outside;
+            break;
         case LifecycleResult::BROKEN_BEFORE_EXPECTED_DEPARTURE:
-            ++t.broken_before_departure; break;
+            ++s.broken_before_departure;
+            break;
         case LifecycleResult::NO_RETURN_BEFORE_END:
-            ++t.no_return; break;
+            ++s.no_return;
+            break;
         case LifecycleResult::DIRECT_BREAKOUT_NO_CLOSE_TOUCH:
-            ++t.direct_breakout; break;
-        case LifecycleResult::TOUCH_UNRESOLVED_AT_END:
-            ++t.touch_unresolved; break;
+            ++s.direct_breakout;
+            break;
         case LifecycleResult::REACTION_FIRST:
+            ++s.reaction;
+            break;
         case LifecycleResult::BREAKOUT_FIRST:
+            ++s.breakout;
+            break;
+        case LifecycleResult::TOUCH_UNRESOLVED_AT_END:
+            ++s.unresolved;
             break;
     }
 }
@@ -166,7 +198,58 @@ std::vector<std::string> find_bin_files(const fs::path& root) {
     return files;
 }
 
-bool build_atr_lookup(
+std::uint64_t mix_u64(std::uint64_t h, std::uint64_t v) {
+    for (int i = 0; i < 8; ++i) {
+        const unsigned char b =
+            static_cast<unsigned char>((v >> (i * 8)) & 0xffu);
+
+        h ^= static_cast<std::uint64_t>(b);
+        h *= 1099511628211ULL;
+    }
+
+    return h;
+}
+
+std::uint64_t double_bits(double value) {
+    std::uint64_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(value), "double must be 64-bit");
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+std::uint64_t series_fingerprint(const XfbarData& data) {
+    std::uint64_t h = 14695981039346656037ULL;
+
+    for (unsigned char ch : data.symbol) {
+        h ^= static_cast<std::uint64_t>(ch);
+        h *= 1099511628211ULL;
+    }
+
+    h = mix_u64(
+        h,
+        static_cast<std::uint64_t>(
+            static_cast<std::uint32_t>(data.period_seconds)));
+
+    h = mix_u64(
+        h,
+        double_bits(data.point));
+
+    h = mix_u64(
+        h,
+        static_cast<std::uint64_t>(data.bars.size()));
+
+    for (const Bar& b : data.bars) {
+        h = mix_u64(h, static_cast<std::uint64_t>(b.time));
+        h = mix_u64(h, double_bits(b.open));
+        h = mix_u64(h, double_bits(b.high));
+        h = mix_u64(h, double_bits(b.low));
+        h = mix_u64(h, double_bits(b.close));
+    }
+
+    return h;
+}
+
+bool load_symbol_m5_atr(
     const std::string& current_file,
     const XfbarData& data,
     ap::AtrLookup& out)
@@ -188,7 +271,8 @@ bool build_atr_lookup(
         return false;
     }
 
-    const auto m5_data = read_xfbar(m5.string());
+    const auto m5_data =
+        read_xfbar(m5.string());
 
     if (!m5_data.success ||
         m5_data.period_seconds != p.atr_timeframe_seconds)
@@ -197,7 +281,10 @@ bool build_atr_lookup(
         return false;
     }
 
-    out.build(m5_data.bars, p.atr_period);
+    out.build(
+        m5_data.bars,
+        p.atr_period);
+
     return out.available();
 }
 
@@ -206,10 +293,12 @@ LifecycleResult evaluate_lifecycle(
     const ap::CloseIndex& index,
     const FormationEvent& e)
 {
-    const std::size_t end = data.bars.size();
-    const std::size_t begin = e.confirmation_index + 1;
-    const double low = e.zone_low;
-    const double high = e.zone_high;
+    const std::size_t end =
+        data.bars.size();
+
+    const std::size_t begin =
+        e.confirmation_index + 1;
+
     const bool bullish =
         e.direction == Direction::BULLISH;
 
@@ -217,8 +306,8 @@ LifecycleResult evaluate_lifecycle(
         index.first_outside(
             begin,
             end,
-            low,
-            high);
+            e.zone_low,
+            e.zone_high);
 
     if (first_out == ap::CloseIndex::npos()) {
         return LifecycleResult::NO_OUTSIDE_BEFORE_END;
@@ -229,8 +318,8 @@ LifecycleResult evaluate_lifecycle(
 
     const bool expected_side =
         bullish
-            ? first_close > high
-            : first_close < low;
+            ? first_close > e.zone_high
+            : first_close < e.zone_low;
 
     if (!expected_side) {
         return LifecycleResult::BROKEN_BEFORE_EXPECTED_DEPARTURE;
@@ -241,11 +330,11 @@ LifecycleResult evaluate_lifecycle(
             ? index.first_le(
                   first_out + 1,
                   end,
-                  high)
+                  e.zone_high)
             : index.first_ge(
                   first_out + 1,
                   end,
-                  low);
+                  e.zone_low);
 
     if (return_idx == ap::CloseIndex::npos()) {
         return LifecycleResult::NO_RETURN_BEFORE_END;
@@ -254,66 +343,53 @@ LifecycleResult evaluate_lifecycle(
     const double return_close =
         data.bars[return_idx].close;
 
-    const bool inside =
-        return_close >= low &&
-        return_close <= high;
-
-    if (!inside) {
+    if (return_close < e.zone_low ||
+        return_close > e.zone_high)
+    {
         return LifecycleResult::DIRECT_BREAKOUT_NO_CLOSE_TOUCH;
     }
 
-    const std::size_t out_after_touch =
+    const std::size_t outcome =
         index.first_outside(
             return_idx + 1,
             end,
-            low,
-            high);
+            e.zone_low,
+            e.zone_high);
 
-    if (out_after_touch == ap::CloseIndex::npos()) {
+    if (outcome == ap::CloseIndex::npos()) {
         return LifecycleResult::TOUCH_UNRESOLVED_AT_END;
     }
 
     const double outcome_close =
-        data.bars[out_after_touch].close;
+        data.bars[outcome].close;
 
     const bool reaction_side =
         bullish
-            ? outcome_close > high
-            : outcome_close < low;
+            ? outcome_close > e.zone_high
+            : outcome_close < e.zone_low;
 
     return reaction_side
         ? LifecycleResult::REACTION_FIRST
         : LifecycleResult::BREAKOUT_FIRST;
 }
 
-void write_stats_line(
-    std::ostream& os,
-    const std::string& label,
+void write_rate_fields(
+    std::ostream& out,
     const Stats& s)
 {
-    const auto ci = wilson95_pct(s);
-
-    os
-        << label
-        << " | rows=" << s.rows
-        << " | resolved=" << s.resolved()
-        << " | reaction=" << s.reaction
-        << " | breakout=" << s.breakout
-        << " | other=" << s.other;
-
-    if (s.resolved() > 0) {
-        os
-            << std::fixed << std::setprecision(6)
-            << " | reaction_pct=" << reaction_rate_pct(s)
-            << " | CI95=[" << ci.first
-            << ',' << ci.second << ']';
-    } else {
-        os
-            << " | reaction_pct=NA"
-            << " | CI95=[NA,NA]";
+    if (s.resolved() == 0) {
+        out << ";;";
+        return;
     }
 
-    os << '\n';
+    const auto ci =
+        wilson95_pct(s);
+
+    out
+        << std::fixed << std::setprecision(9)
+        << reaction_rate_pct(s) << ';'
+        << ci.first << ';'
+        << ci.second;
 }
 
 } // namespace
@@ -346,21 +422,33 @@ int main(int argc, char** argv) {
         return 3;
     }
 
-    const fs::path summary_path =
-        out_root / "05_OOS_SUMMARY.txt";
+    const fs::path instrument_path =
+        out_root / "05_OOS_INSTRUMENT_STATS.csv";
 
     const fs::path failures_path =
         out_root / "05_FAILURES.csv";
+
+    const fs::path summary_path =
+        out_root / "05_OOS_SUMMARY.txt";
+
+    std::ofstream instrument(
+        instrument_path,
+        std::ios::binary);
 
     std::ofstream failures(
         failures_path,
         std::ios::binary);
 
-    if (!failures) {
+    if (!instrument || !failures) {
         std::cerr
-            << "BLOCK05 FAIL - CANNOT_OPEN_FAILURES\n";
+            << "BLOCK05 FAIL - CANNOT_OPEN_OUTPUTS\n";
         return 4;
     }
+
+    instrument
+        << "Symbol;Timeframe;OOSCandidateFormations;OOSAcceptedZones;"
+        << "OOSRejectedGap;Resolved;Reaction;Breakout;ReactionPct;"
+        << "CI95LowPct;CI95HighPct;OtherLifecycle\n";
 
     failures << "File;Reason\n";
 
@@ -374,22 +462,25 @@ int main(int argc, char** argv) {
     }
 
     Totals total;
-    total.files_found = files.size();
+    total.bin_files_scanned = files.size();
 
     std::cout
         << "============================================================\n"
-        << "RZA CANONICAL BLOCK 05 - FINAL OOS WITH ABS_TRACK POLICY\n"
+        << "RZA CANONICAL BLOCK 05 - FINAL OOS 2024+\n"
         << "OOS_START=2024-01-01T00:00:00Z\n"
-        << "STREAM=ALL_CONFIRMED_ENGULF_RECTANGLES\n"
-        << "FORMATION_SPLIT=OFF\n"
-        << "PROGRESS=OFF\n"
-        << "MIN_ZONE_HEIGHT_POINTS=225\n"
-        << "MIN_GAP=max(20 points, 0.30 * ATR(M5,14))\n"
-        << "DELETE=10 points beyond opposite boundary by close\n"
-        << "HISTORICAL_SPREAD_FLOOR=30 points\n"
-        << "OOS_SAMPLE=ALL_ACCEPTED_ZONES\n"
-        << "OUTPUT=SUMMARY_ONLY\n"
+        << "TEST_UNIT=SYMBOL+TIMEFRAME\n"
+        << "FORMATION_LOGIC=ABS_TRACK_EXACT_PRIORITY\n"
+        << "ZONE_POLICY=ABS_TRACK_V2\n"
+        << "SAMPLING=OFF\n"
+        << "FULL_PRE_OOS_REPLAY=ON\n"
+        << "EVENT_CSV=OFF\n"
         << "============================================================\n";
+
+    std::string cached_symbol;
+    ap::AtrLookup cached_atr;
+    bool cached_atr_available = false;
+
+    std::map<std::string, SeenSeries> seen_series;
 
     for (std::size_t file_idx = 0;
          file_idx < files.size();
@@ -402,64 +493,117 @@ int main(int argc, char** argv) {
             if (data.error == "bad_magic") {
                 ++total.skipped_non_xfbar;
             } else {
-                ++total.files_failed;
+                ++total.xfbar_files_failed;
                 failures
-                    << files[file_idx] << ';'
-                    << data.error << '\n';
+                    << csv_field(files[file_idx]) << ';'
+                    << csv_field(data.error) << '\n';
             }
             continue;
         }
 
-        ++total.files_passed;
+        ++total.xfbar_files_passed;
 
         if (!(data.point > 0.0)) {
-            ++total.files_failed;
+            ++total.xfbar_files_failed;
             failures
-                << files[file_idx] << ';'
+                << csv_field(files[file_idx]) << ';'
                 << "nonpositive_point\n";
             continue;
         }
 
-        ap::AtrLookup atr;
-        const bool atr_available =
-            build_atr_lookup(
-                files[file_idx],
-                data,
-                atr);
+        const std::string series_key =
+            data.symbol + "|" +
+            std::to_string(data.period_seconds);
 
-        if (!atr_available) {
-            ++total.m5_atr_missing_files;
+        const std::uint64_t fingerprint =
+            series_fingerprint(data);
+
+        const auto seen_it =
+            seen_series.find(series_key);
+
+        if (seen_it != seen_series.end()) {
+            if (seen_it->second.fingerprint == fingerprint) {
+                ++total.duplicate_identical_series;
+                continue;
+            }
+
+            ++total.duplicate_conflict_series;
+            failures
+                << csv_field(files[file_idx]) << ';'
+                << "duplicate_symbol_timeframe_conflict_with="
+                << csv_field(seen_it->second.file) << '\n';
+            continue;
         }
 
-        const ap::CloseIndex index(data.bars);
+        seen_series.emplace(
+            series_key,
+            SeenSeries{fingerprint, files[file_idx]});
+
+        if (data.bars.size() < 4) {
+            continue;
+        }
+
+        if (data.symbol != cached_symbol) {
+            cached_symbol = data.symbol;
+            cached_atr = ap::AtrLookup{};
+            cached_atr_available =
+                load_symbol_m5_atr(
+                    files[file_idx],
+                    data,
+                    cached_atr);
+        }
+
+        if (!cached_atr_available) {
+            ++total.series_excluded_no_m5_atr;
+            failures
+                << csv_field(files[file_idx]) << ';'
+                << "excluded_no_m5_atr_for_abs_track_gap\n";
+            continue;
+        }
+
+        const ap::CloseIndex close_index(
+            data.bars);
+
         ap::ActiveZones active;
 
+        std::uint64_t oos_candidates = 0;
+        std::uint64_t oos_accepted = 0;
+        std::uint64_t oos_rejected_gap = 0;
+        Stats stats;
+
+        bool has_oos_calendar = false;
+
         for (std::size_t confirm_idx = 0;
-             confirm_idx < data.bars.size();
+             confirm_idx + 1 < data.bars.size();
              ++confirm_idx)
         {
-            const std::int64_t available_at =
-                data.bars[confirm_idx].time +
-                data.period_seconds;
+            const std::int64_t decision_time =
+                data.bars[confirm_idx + 1].time;
+
+            const bool is_oos =
+                decision_time >= OOS_START_UTC;
+
+            if (is_oos) {
+                has_oos_calendar = true;
+            }
 
             active.expire(confirm_idx);
 
             const auto e_opt =
-                detect_at(data.bars, confirm_idx);
+                detect_at(
+                    data.bars,
+                    confirm_idx);
 
             if (!e_opt.has_value()) {
                 continue;
             }
 
             FormationEvent e = *e_opt;
-
-            ++total.formations_total_replayed;
-
-            const bool is_oos =
-                available_at >= OOS_START_UTC;
+            ++total.candidate_total;
 
             if (is_oos) {
-                ++total.formations_oos;
+                ++oos_candidates;
+                ++total.candidate_oos;
             }
 
             const ap::ZoneBounds z =
@@ -472,7 +616,8 @@ int main(int argc, char** argv) {
             e.zone_high = z.high;
 
             const double atr_value =
-                atr.at_decision(available_at);
+                cached_atr.at_decision(
+                    decision_time);
 
             const double req_gap =
                 ap::required_gap(
@@ -488,6 +633,7 @@ int main(int argc, char** argv) {
                 ++total.rejected_gap_total;
 
                 if (is_oos) {
+                    ++oos_rejected_gap;
                     ++total.rejected_gap_oos;
                 }
                 continue;
@@ -495,7 +641,7 @@ int main(int argc, char** argv) {
 
             const std::size_t break_idx =
                 ap::zone_break_index(
-                    index,
+                    close_index,
                     data.bars,
                     confirm_idx,
                     e.direction,
@@ -509,34 +655,53 @@ int main(int argc, char** argv) {
                 e.zone_high,
                 break_idx);
 
-            ++total.accepted_total_replayed;
+            ++total.accepted_total;
 
             if (!is_oos) {
                 continue;
             }
 
+            ++oos_accepted;
+            ++stats.accepted;
             ++total.accepted_oos;
+            ++total.oos.accepted;
 
             const LifecycleResult result =
                 evaluate_lifecycle(
                     data,
-                    index,
+                    close_index,
                     e);
 
-            count_lifecycle(total, result);
-            update_stats(total.overall, result);
-
-            update_stats(
-                total.by_direction[
-                    direction_name(e.direction)],
-                result);
-
-            update_stats(
-                total.by_timeframe[
-                    timeframe_name(
-                        data.period_seconds)],
-                result);
+            count_result(stats, result);
+            count_result(total.oos, result);
         }
+
+        ++total.series_replayed;
+
+        if (!has_oos_calendar) {
+            continue;
+        }
+
+        ++total.series_with_oos;
+
+        instrument
+            << csv_field(data.symbol) << ';'
+            << timeframe_name(data.period_seconds) << ';'
+            << oos_candidates << ';'
+            << oos_accepted << ';'
+            << oos_rejected_gap << ';'
+            << stats.resolved() << ';'
+            << stats.reaction << ';'
+            << stats.breakout << ';';
+
+        write_rate_fields(
+            instrument,
+            stats);
+
+        instrument
+            << ';'
+            << stats.other()
+            << '\n';
 
         if ((file_idx + 1) % 25 == 0 ||
             file_idx + 1 == files.size())
@@ -545,22 +710,20 @@ int main(int argc, char** argv) {
                 << '[' << (file_idx + 1)
                 << '/' << files.size() << "] "
                 << data.symbol << '_'
-                << timeframe_name(
-                    data.period_seconds)
-                << " accepted_oos="
-                << total.accepted_oos
+                << timeframe_name(data.period_seconds)
+                << " oos_accepted="
+                << oos_accepted
                 << " resolved="
-                << total.overall.resolved()
+                << stats.resolved()
                 << " reaction="
-                << total.overall.reaction
+                << stats.reaction
                 << " breakout="
-                << total.overall.breakout
-                << " failed="
-                << total.files_failed
+                << stats.breakout
                 << '\n';
         }
     }
 
+    instrument.close();
     failures.close();
 
     std::ofstream summary(
@@ -574,12 +737,17 @@ int main(int argc, char** argv) {
     }
 
     const auto overall_ci =
-        wilson95_pct(total.overall);
+        wilson95_pct(total.oos);
 
     summary
-        << "RZA CANONICAL BLOCK 05 - FINAL OOS WITH ABS_TRACK POLICY\n"
+        << "RZA CANONICAL BLOCK 05 - FINAL OOS 2024+\n"
         << "OOS_START_UTC=2024-01-01T00:00:00Z\n"
-        << "STREAM=ALL_CONFIRMED_ENGULF_RECTANGLES\n"
+        << "TEST_UNIT=SYMBOL+TIMEFRAME\n"
+        << "FORMATION_LOGIC=ABS_TRACK_EXACT_PRIORITY\n"
+        << "ZONE_POLICY=ABS_TRACK_V2\n"
+        << "SAMPLING=OFF\n"
+        << "FULL_PRE_OOS_REPLAY=1\n"
+        << "EVENT_CSV=OFF\n"
         << "FORMATION_TYPE_USED_FOR_SPLIT=0\n"
         << "PROGRESS_USED=0\n"
         << "MIN_ZONE_HEIGHT_POINTS=225\n"
@@ -589,152 +757,134 @@ int main(int argc, char** argv) {
         << "DISTANCE_ATR_PERIOD=14\n"
         << "DELETION_THRESHOLD_POINTS=10\n"
         << "HISTORICAL_SPREAD_POINTS=30\n"
-        << "OOS_SAMPLE=ALL_ACCEPTED_ZONES\n"
-        << "FILES_FOUND=" << total.files_found << '\n'
-        << "FILES_PASSED=" << total.files_passed << '\n'
-        << "FILES_FAILED=" << total.files_failed << '\n'
+        << "BIN_FILES_SCANNED="
+        << total.bin_files_scanned << '\n'
+        << "XFBAR_FILES_PASSED="
+        << total.xfbar_files_passed << '\n'
+        << "XFBAR_FILES_FAILED="
+        << total.xfbar_files_failed << '\n'
         << "SKIPPED_NON_XFBAR="
         << total.skipped_non_xfbar << '\n'
-        << "M5_ATR_MISSING_FILES="
-        << total.m5_atr_missing_files << '\n'
-        << "FORMATIONS_TOTAL_REPLAYED="
-        << total.formations_total_replayed << '\n'
+        << "SERIES_REPLAYED="
+        << total.series_replayed << '\n'
+        << "SERIES_WITH_OOS="
+        << total.series_with_oos << '\n'
+        << "SERIES_EXCLUDED_NO_M5_ATR="
+        << total.series_excluded_no_m5_atr << '\n'
+        << "DUPLICATE_IDENTICAL_SERIES="
+        << total.duplicate_identical_series << '\n'
+        << "DUPLICATE_CONFLICT_SERIES="
+        << total.duplicate_conflict_series << '\n'
+        << "CANDIDATE_TOTAL_REPLAYED="
+        << total.candidate_total << '\n'
         << "ACCEPTED_TOTAL_REPLAYED="
-        << total.accepted_total_replayed << '\n'
-        << "REJECTED_GAP_TOTAL="
+        << total.accepted_total << '\n'
+        << "REJECTED_GAP_TOTAL_REPLAYED="
         << total.rejected_gap_total << '\n'
-        << "FORMATIONS_OOS="
-        << total.formations_oos << '\n'
-        << "ACCEPTED_OOS="
+        << "OOS_CANDIDATE_FORMATIONS="
+        << total.candidate_oos << '\n'
+        << "OOS_ACCEPTED_ZONES="
         << total.accepted_oos << '\n'
-        << "REJECTED_GAP_OOS="
+        << "OOS_REJECTED_GAP="
         << total.rejected_gap_oos << '\n'
-        << "NO_OUTSIDE_BEFORE_END="
-        << total.no_outside << '\n'
-        << "BROKEN_BEFORE_EXPECTED_DEPARTURE="
-        << total.broken_before_departure << '\n'
-        << "NO_RETURN_BEFORE_END="
-        << total.no_return << '\n'
-        << "DIRECT_BREAKOUT_NO_CLOSE_TOUCH="
-        << total.direct_breakout << '\n'
-        << "TOUCH_UNRESOLVED_AT_END="
-        << total.touch_unresolved << '\n';
+        << "OOS_RESOLVED_TOUCH_OUTCOMES="
+        << total.oos.resolved() << '\n'
+        << "OOS_REACTION_FIRST="
+        << total.oos.reaction << '\n'
+        << "OOS_BREAKOUT_FIRST="
+        << total.oos.breakout << '\n'
+        << "OOS_OTHER_LIFECYCLE="
+        << total.oos.other() << '\n';
 
-    summary << "\n[OVERALL]\n";
-    write_stats_line(
-        summary,
-        "ALL",
-        total.overall);
-
-    summary << "\n[DIRECTION]\n";
-    for (const auto& kv : total.by_direction) {
-        write_stats_line(
-            summary,
-            kv.first,
-            kv.second);
+    if (total.oos.resolved() > 0) {
+        summary
+            << std::fixed << std::setprecision(9)
+            << "OOS_REACTION_PCT="
+            << reaction_rate_pct(total.oos) << '\n'
+            << "OOS_REACTION_CI95_LOW_PCT="
+            << overall_ci.first << '\n'
+            << "OOS_REACTION_CI95_HIGH_PCT="
+            << overall_ci.second << '\n';
+    } else {
+        summary
+            << "OOS_REACTION_PCT=NA\n"
+            << "OOS_REACTION_CI95_LOW_PCT=NA\n"
+            << "OOS_REACTION_CI95_HIGH_PCT=NA\n";
     }
-
-    summary << "\n[TIMEFRAME]\n";
-    for (const auto& kv : total.by_timeframe) {
-        write_stats_line(
-            summary,
-            kv.first,
-            kv.second);
-    }
-
-    const auto bear_it =
-        total.by_direction.find("BEARISH");
-
-    const auto bull_it =
-        total.by_direction.find("BULLISH");
-
-    const bool overall_confirmed =
-        total.overall.resolved() > 0 &&
-        overall_ci.first > 50.0;
-
-    const bool bearish_confirmed =
-        bear_it != total.by_direction.end() &&
-        bear_it->second.resolved() > 0 &&
-        wilson95_pct(
-            bear_it->second).first > 50.0;
-
-    const bool bullish_confirmed =
-        bull_it != total.by_direction.end() &&
-        bull_it->second.resolved() > 0 &&
-        wilson95_pct(
-            bull_it->second).first > 50.0;
-
-    const bool structural_gate =
-        overall_confirmed &&
-        bearish_confirmed &&
-        bullish_confirmed;
-
-    summary
-        << "\n[FINAL_GATE]\n"
-        << "GATE_RULE=LOWER_WILSON95_REACTION_PCT_GT_50_OVERALL_AND_BOTH_DIRECTIONS\n"
-        << "OVERALL_CONFIRMED="
-        << (overall_confirmed ? 1 : 0) << '\n'
-        << "BEARISH_CONFIRMED="
-        << (bearish_confirmed ? 1 : 0) << '\n'
-        << "BULLISH_CONFIRMED="
-        << (bullish_confirmed ? 1 : 0) << '\n'
-        << "STRUCTURAL_HYPOTHESIS_GATE="
-        << (structural_gate ? "PASS" : "FAIL")
-        << '\n';
 
     summary
         << "\nCONTRACT:\n"
-        << "- Full history is replayed causally to seed active zones before OOS.\n"
-        << "- OOS statistics use every accepted 2024+ zone; no 1/64 sampling.\n"
-        << "- Formation type is not used for grouping or filtering.\n"
-        << "- Progress is not used.\n"
-        << "- Zone bounds, distance filter and deletion threshold reproduce ABS_TRACK_v2 policy.\n"
-        << "- This is a structural reaction/breakout test, not a trading PnL test.\n";
+        << "- Full history is replayed causally so pre-2024 live zones seed the 2024+ state.\n"
+        << "- Every unique symbol+timeframe series is tested separately.\n"
+        << "- Exact duplicate series are counted once; conflicting duplicates make the block fail.\n"
+        << "- A series without M5 ATR is excluded rather than tested with a reduced rule.\n"
+        << "- Every accepted OOS zone is evaluated; there is no 1/64 sampling.\n"
+        << "- OOS instrument statistics are written to 05_OOS_INSTRUMENT_STATS.csv.\n"
+        << "- No parameter is changed or optimized using OOS data.\n"
+        << "- This is a structural reaction/breakout test, not a PnL test.\n";
 
     summary.close();
 
     std::cout
         << "------------------------------------------------------------\n"
-        << "FILES_FOUND=" << total.files_found << '\n'
-        << "FILES_PASSED=" << total.files_passed << '\n'
-        << "FILES_FAILED=" << total.files_failed << '\n'
-        << "SKIPPED_NON_XFBAR="
-        << total.skipped_non_xfbar << '\n'
-        << "M5_ATR_MISSING_FILES="
-        << total.m5_atr_missing_files << '\n'
-        << "FORMATIONS_OOS="
-        << total.formations_oos << '\n'
-        << "ACCEPTED_OOS="
+        << "SERIES_REPLAYED="
+        << total.series_replayed << '\n'
+        << "SERIES_WITH_OOS="
+        << total.series_with_oos << '\n'
+        << "SERIES_EXCLUDED_NO_M5_ATR="
+        << total.series_excluded_no_m5_atr << '\n'
+        << "DUPLICATE_IDENTICAL_SERIES="
+        << total.duplicate_identical_series << '\n'
+        << "DUPLICATE_CONFLICT_SERIES="
+        << total.duplicate_conflict_series << '\n'
+        << "OOS_CANDIDATE_FORMATIONS="
+        << total.candidate_oos << '\n'
+        << "OOS_ACCEPTED_ZONES="
         << total.accepted_oos << '\n'
-        << "REJECTED_GAP_OOS="
+        << "OOS_REJECTED_GAP="
         << total.rejected_gap_oos << '\n'
-        << "RESOLVED="
-        << total.overall.resolved() << '\n'
-        << "REACTION="
-        << total.overall.reaction << '\n'
-        << "BREAKOUT="
-        << total.overall.breakout << '\n'
-        << std::fixed << std::setprecision(6)
-        << "REACTION_PCT="
-        << reaction_rate_pct(total.overall) << '\n'
-        << "STRUCTURAL_HYPOTHESIS_GATE="
-        << (structural_gate ? "PASS" : "FAIL")
-        << '\n'
-        << "SUMMARY="
-        << summary_path.string()
-        << '\n';
+        << "OOS_RESOLVED_TOUCH_OUTCOMES="
+        << total.oos.resolved() << '\n'
+        << "OOS_REACTION_FIRST="
+        << total.oos.reaction << '\n'
+        << "OOS_BREAKOUT_FIRST="
+        << total.oos.breakout << '\n';
 
-    if (total.files_failed != 0) {
+    if (total.oos.resolved() > 0) {
+        std::cout
+            << std::fixed << std::setprecision(6)
+            << "OOS_REACTION_PCT="
+            << reaction_rate_pct(total.oos)
+            << '\n';
+    }
+
+    std::cout
+        << "OOS_INSTRUMENT_STATS="
+        << instrument_path.string() << '\n'
+        << "SUMMARY="
+        << summary_path.string() << '\n';
+
+    if (total.xfbar_files_failed != 0) {
         std::cout
             << "BLOCK05 FAIL - INVALID_XFBAR_FILES="
-            << total.files_failed << '\n';
+            << total.xfbar_files_failed << '\n';
         return 7;
     }
 
-    if (total.accepted_oos == 0) {
+    if (total.duplicate_conflict_series != 0) {
         std::cout
-            << "BLOCK05 FAIL - ZERO_ACCEPTED_OOS_ZONES\n";
+            << "BLOCK05 FAIL - DUPLICATE_SERIES_CONFLICT="
+            << total.duplicate_conflict_series << '\n';
         return 8;
+    }
+
+    if (total.series_with_oos == 0 ||
+        total.accepted_oos == 0 ||
+        total.oos.resolved() == 0)
+    {
+        std::cout
+            << "BLOCK05 FAIL - ZERO_TESTABLE_OOS_RESULT\n";
+        return 9;
     }
 
     std::cout << "BLOCK05 PASS\n";

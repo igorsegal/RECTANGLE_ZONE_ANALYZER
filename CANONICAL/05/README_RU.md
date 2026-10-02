@@ -1,24 +1,73 @@
-# CANONICAL Block 05 — Final OOS with ABS_TRACK policy
+# CANONICAL Block 05 — Final OOS 2024+
 
-Final OOS uses the same unified rectangle stream and the zone rules ported from `ABS_TRACK_v2.mq4`.
+Это последняя независимая проверка текущей структурной гипотезы RZA.
 
-## Important
+## Замороженная логика
 
-Before testing 2024+ events, Block 05 replays the full earlier history causally so that active old rectangles can correctly block a new same-direction rectangle.
+Block 05 использует ровно ту же логику, что новый Block 03:
 
-## Ported rules
+- единица теста — `Symbol + Timeframe`;
+- порядок обнаружения formation соответствует `ABS_TRACK_v2`;
+- границы прямоугольника соответствуют `ABS_TRACK_v2`;
+- `RequiredGap = max(20 * Point, 0.30 * ATR(M5,14))`;
+- удаление живой зоны — после close за противоположной границей на 10 points;
+- исторический spread-floor — 30 points;
+- formation subtype не используется;
+- progress не используется;
+- sampling отключён.
 
-- minimum zone-height rule: 225 points;
-- minimum same-direction gap: max(20 points, 0.30 × ATR(M5,14));
-- zone deletion after close 10 points beyond the opposite boundary;
-- historical spread floor: 30 points.
+## Важный принцип OOS
 
-Formation subtype and progress are not used.
+Перед началом 2024+ полный предыдущий ряд проигрывается причинно.
 
-## OOS sampling
+Это нужно, чтобы живые уровни, созданные до 2024 года, корректно существовали или были удалены к моменту первого OOS-события.
 
-There is no 1/64 reduction in final OOS.
+Только после этого считаются результаты событий с decision-time:
 
-Every accepted 2024+ rectangle is evaluated.
+```text
+>= 2024-01-01T00:00:00Z
+```
 
-The output is summary-only, so no giant OOS event CSV is written.
+## Результаты
+
+Основной файл:
+
+```text
+05_OOS_INSTRUMENT_STATS.csv
+```
+
+Одна строка = один `Symbol + Timeframe`.
+
+Поля:
+
+```text
+Symbol
+Timeframe
+OOSCandidateFormations
+OOSAcceptedZones
+OOSRejectedGap
+Resolved
+Reaction
+Breakout
+ReactionPct
+CI95LowPct
+CI95HighPct
+OtherLifecycle
+```
+
+Также создаются:
+
+```text
+05_OOS_SUMMARY.txt
+05_FAILURES.csv
+```
+
+## Контроль чистоты
+
+- одинаковый дубликат ряда учитывается один раз;
+- конфликтующий дубликат = FAIL;
+- отсутствие M5 ATR = явное исключение ряда;
+- все принятые OOS-зоны тестируются, 1/64 нет;
+- параметры после просмотра OOS не меняются.
+
+Block 05 не является PnL-тестом. Он проверяет только воспроизводимость реакции/пробоя на независимом периоде 2024+.
