@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -60,7 +61,9 @@ struct Totals {
     std::uint64_t xfbar_files_failed = 0;
     std::uint64_t skipped_non_xfbar = 0;
     std::uint64_t series_tested = 0;
-    std::uint64_t series_without_m5_atr = 0;
+    std::uint64_t series_excluded_no_m5_atr = 0;
+    std::uint64_t duplicate_identical_series = 0;
+    std::uint64_t duplicate_conflict_series = 0;
 
     std::uint64_t candidate_formations = 0;
     std::uint64_t accepted_zones = 0;
@@ -181,6 +184,52 @@ std::vector<std::string> find_bin_files(const fs::path& root) {
     std::sort(files.begin(), files.end());
     return files;
 }
+
+std::uint64_t mix_u64(std::uint64_t h, std::uint64_t v) {
+    for (int i = 0; i < 8; ++i) {
+        const unsigned char b =
+            static_cast<unsigned char>((v >> (i * 8)) & 0xffu);
+        h ^= static_cast<std::uint64_t>(b);
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+std::uint64_t double_bits(double value) {
+    std::uint64_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(value), "double must be 64-bit");
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+std::uint64_t series_fingerprint(const XfbarData& data) {
+    std::uint64_t h = 14695981039346656037ULL;
+
+    for (unsigned char ch : data.symbol) {
+        h ^= static_cast<std::uint64_t>(ch);
+        h *= 1099511628211ULL;
+    }
+
+    h = mix_u64(h, static_cast<std::uint64_t>(
+        static_cast<std::uint32_t>(data.period_seconds)));
+    h = mix_u64(h, double_bits(data.point));
+    h = mix_u64(h, static_cast<std::uint64_t>(data.bars.size()));
+
+    for (const Bar& b : data.bars) {
+        h = mix_u64(h, static_cast<std::uint64_t>(b.time));
+        h = mix_u64(h, double_bits(b.open));
+        h = mix_u64(h, double_bits(b.high));
+        h = mix_u64(h, double_bits(b.low));
+        h = mix_u64(h, double_bits(b.close));
+    }
+
+    return h;
+}
+
+struct SeenSeries {
+    std::uint64_t fingerprint = 0;
+    std::string file;
+};
 
 std::size_t development_end_exclusive(const XfbarData& data) {
     const auto it = std::lower_bound(
@@ -423,6 +472,7 @@ int main(int argc, char** argv) {
     std::string cached_symbol;
     ap::AtrLookup cached_atr;
     bool cached_atr_available = false;
+    std::map<std::string, SeenSeries> seen_series;
 
     for (std::size_t file_idx = 0;
          file_idx < files.size();
@@ -453,6 +503,33 @@ int main(int argc, char** argv) {
             continue;
         }
 
+        const std::string series_key =
+            data.symbol + "|" + std::to_string(data.period_seconds);
+
+        const std::uint64_t fingerprint =
+            series_fingerprint(data);
+
+        const auto seen_it =
+            seen_series.find(series_key);
+
+        if (seen_it != seen_series.end()) {
+            if (seen_it->second.fingerprint == fingerprint) {
+                ++total.duplicate_identical_series;
+                continue;
+            }
+
+            ++total.duplicate_conflict_series;
+            failures
+                << csv_field(files[file_idx]) << ';'
+                << "duplicate_symbol_timeframe_conflict_with="
+                << csv_field(seen_it->second.file) << '\n';
+            continue;
+        }
+
+        seen_series.emplace(
+            series_key,
+            SeenSeries{fingerprint, files[file_idx]});
+
         const std::size_t dev_end =
             development_end_exclusive(data);
 
@@ -471,7 +548,11 @@ int main(int argc, char** argv) {
         }
 
         if (!cached_atr_available) {
-            ++total.series_without_m5_atr;
+            ++total.series_excluded_no_m5_atr;
+            failures
+                << csv_field(files[file_idx]) << ';'
+                << "excluded_no_m5_atr_for_abs_track_gap\n";
+            continue;
         }
 
         const ap::CloseIndex close_index(
@@ -656,8 +737,12 @@ int main(int argc, char** argv) {
         << total.skipped_non_xfbar << '\n'
         << "SERIES_TESTED="
         << total.series_tested << '\n'
-        << "SERIES_WITHOUT_M5_ATR="
-        << total.series_without_m5_atr << '\n'
+        << "SERIES_EXCLUDED_NO_M5_ATR="
+        << total.series_excluded_no_m5_atr << '\n'
+        << "DUPLICATE_IDENTICAL_SERIES="
+        << total.duplicate_identical_series << '\n'
+        << "DUPLICATE_CONFLICT_SERIES="
+        << total.duplicate_conflict_series << '\n'
         << "CANDIDATE_FORMATIONS="
         << total.candidate_formations << '\n'
         << "ACCEPTED_ZONES="
@@ -692,7 +777,9 @@ int main(int argc, char** argv) {
     summary
         << "\nCONTRACT:\n"
         << "- 3149-style counts are database file metadata, not event counts.\n"
-        << "- Every symbol+timeframe series is tested separately.\n"
+        << "- Every unique symbol+timeframe series is tested separately.\n"
+        << "- Exact duplicate series are counted once; conflicting duplicates make the block fail.\n"
+        << "- A series without M5 ATR cannot reproduce ABS_TRACK gap logic and is excluded explicitly.\n"
         << "- Only zones accepted by the ABS_TRACK_v2 bounds/gap/deletion policy enter the reaction test.\n"
         << "- All accepted development zones are evaluated; there is no 1/64 sample.\n"
         << "- Instrument statistics are written to 03_INSTRUMENT_STATS.csv.\n"
@@ -707,6 +794,12 @@ int main(int argc, char** argv) {
         << total.bin_files_scanned << '\n'
         << "SERIES_TESTED="
         << total.series_tested << '\n'
+        << "SERIES_EXCLUDED_NO_M5_ATR="
+        << total.series_excluded_no_m5_atr << '\n'
+        << "DUPLICATE_IDENTICAL_SERIES="
+        << total.duplicate_identical_series << '\n'
+        << "DUPLICATE_CONFLICT_SERIES="
+        << total.duplicate_conflict_series << '\n'
         << "CANDIDATE_FORMATIONS="
         << total.candidate_formations << '\n'
         << "ACCEPTED_ZONES="
@@ -741,13 +834,20 @@ int main(int argc, char** argv) {
         return 7;
     }
 
+    if (total.duplicate_conflict_series != 0) {
+        std::cout
+            << "BLOCK03 FAIL - DUPLICATE_SERIES_CONFLICT="
+            << total.duplicate_conflict_series << '\n';
+        return 8;
+    }
+
     if (total.series_tested == 0 ||
         total.accepted_zones == 0 ||
         total.lifecycle.resolved() == 0)
     {
         std::cout
             << "BLOCK03 FAIL - ZERO_TESTABLE_RESULT\n";
-        return 8;
+        return 9;
     }
 
     std::cout << "BLOCK03 PASS\n";
