@@ -80,3 +80,26 @@ The old 61.01% result belongs to the previous zone definition and is obsolete.
 Если для одной пары найдены разные ряды, Block 03 завершится FAIL как `DUPLICATE_SERIES_CONFLICT`.
 
 Если для ряда невозможно получить M5 ATR, этот ряд явно исключается из теста. Использовать только `MinGapPoints` вместо полного правила ABS_TRACK запрещено.
+
+
+## Эмуляция сделки
+
+В том же проходе Block 03 теперь создаёт `03_TRADE_EMULATION.csv`.
+
+Правило сделки специально простое и причинное:
+
+```text
+bullish zone -> BUY
+bearish zone -> SELL
+entry = close первого touch-бара внутри зоны
+exit  = close первого следующего бара, закрывшегося вне зоны
+```
+
+Для исполнения используется исторический spread из XFBAR:
+
+- BUY: вход по Ask = Bid close + spread, выход по Bid close;
+- SELL: вход по Bid close, выход по Ask = Bid close + spread.
+
+Комиссия, slippage и swap пока равны нулю и явно фиксируются в summary.
+
+Это event-level эмуляция сделки, а не портфельный/маржинальный backtest. Одновременные события пока оцениваются независимо.

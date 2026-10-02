@@ -183,6 +183,7 @@ XfbarData read_xfbar(const std::string& file_path) {
         b.high = r.high;
         b.low = r.low;
         b.close = r.close;
+        b.spread = r.spread;
         out.bars.push_back(b);
     }
 

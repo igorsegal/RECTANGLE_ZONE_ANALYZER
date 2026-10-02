@@ -13,6 +13,10 @@ struct Bar {
     double high = 0.0;
     double low = 0.0;
     double close = 0.0;
+
+    // Historical XFBAR spread in broker points.
+    // Synthetic/unit-test bars leave this at 0.
+    std::int32_t spread = 0;
 };
 
 enum class FormationType {

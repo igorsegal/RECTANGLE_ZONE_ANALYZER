@@ -1,6 +1,7 @@
 #include "../01/formation_detector.h"
 #include "../02/xfbar_reader.h"
 #include "../abs_track_policy.h"
+#include "../trade_emulator.h"
 
 #include <algorithm>
 #include <cmath>
@@ -18,6 +19,7 @@
 namespace fs = std::filesystem;
 using namespace rza::canonical;
 namespace ap = rza::canonical::abs_track;
+namespace te = rza::canonical::trade_emulation;
 
 namespace {
 
@@ -31,6 +33,12 @@ enum class LifecycleResult {
     REACTION_FIRST,
     BREAKOUT_FIRST,
     TOUCH_UNRESOLVED_AT_END
+};
+
+struct Evaluation {
+    LifecycleResult result;
+    std::size_t touch_index = ap::CloseIndex::npos();
+    std::size_t outcome_index = ap::CloseIndex::npos();
 };
 
 struct Stats {
@@ -288,7 +296,7 @@ bool load_symbol_m5_atr(
     return out.available();
 }
 
-LifecycleResult evaluate_lifecycle(
+Evaluation evaluate_lifecycle(
     const XfbarData& data,
     const ap::CloseIndex& index,
     const FormationEvent& e)
@@ -310,7 +318,7 @@ LifecycleResult evaluate_lifecycle(
             e.zone_high);
 
     if (first_out == ap::CloseIndex::npos()) {
-        return LifecycleResult::NO_OUTSIDE_BEFORE_END;
+        return {LifecycleResult::NO_OUTSIDE_BEFORE_END};
     }
 
     const double first_close =
@@ -322,7 +330,7 @@ LifecycleResult evaluate_lifecycle(
             : first_close < e.zone_low;
 
     if (!expected_side) {
-        return LifecycleResult::BROKEN_BEFORE_EXPECTED_DEPARTURE;
+        return {LifecycleResult::BROKEN_BEFORE_EXPECTED_DEPARTURE};
     }
 
     const std::size_t return_idx =
@@ -337,7 +345,7 @@ LifecycleResult evaluate_lifecycle(
                   e.zone_low);
 
     if (return_idx == ap::CloseIndex::npos()) {
-        return LifecycleResult::NO_RETURN_BEFORE_END;
+        return {LifecycleResult::NO_RETURN_BEFORE_END};
     }
 
     const double return_close =
@@ -346,7 +354,7 @@ LifecycleResult evaluate_lifecycle(
     if (return_close < e.zone_low ||
         return_close > e.zone_high)
     {
-        return LifecycleResult::DIRECT_BREAKOUT_NO_CLOSE_TOUCH;
+        return {LifecycleResult::DIRECT_BREAKOUT_NO_CLOSE_TOUCH};
     }
 
     const std::size_t outcome =
@@ -357,7 +365,7 @@ LifecycleResult evaluate_lifecycle(
             e.zone_high);
 
     if (outcome == ap::CloseIndex::npos()) {
-        return LifecycleResult::TOUCH_UNRESOLVED_AT_END;
+        return {LifecycleResult::TOUCH_UNRESOLVED_AT_END, return_idx, ap::CloseIndex::npos()};
     }
 
     const double outcome_close =
@@ -368,9 +376,13 @@ LifecycleResult evaluate_lifecycle(
             ? outcome_close > e.zone_high
             : outcome_close < e.zone_low;
 
-    return reaction_side
-        ? LifecycleResult::REACTION_FIRST
-        : LifecycleResult::BREAKOUT_FIRST;
+    return {
+        reaction_side
+            ? LifecycleResult::REACTION_FIRST
+            : LifecycleResult::BREAKOUT_FIRST,
+        return_idx,
+        outcome
+    };
 }
 
 void write_rate_fields(
@@ -425,6 +437,9 @@ int main(int argc, char** argv) {
     const fs::path instrument_path =
         out_root / "05_OOS_INSTRUMENT_STATS.csv";
 
+    const fs::path trade_path =
+        out_root / "05_OOS_TRADE_EMULATION.csv";
+
     const fs::path failures_path =
         out_root / "05_FAILURES.csv";
 
@@ -435,11 +450,15 @@ int main(int argc, char** argv) {
         instrument_path,
         std::ios::binary);
 
+    std::ofstream trade(
+        trade_path,
+        std::ios::binary);
+
     std::ofstream failures(
         failures_path,
         std::ios::binary);
 
-    if (!instrument || !failures) {
+    if (!instrument || !trade || !failures) {
         std::cerr
             << "BLOCK05 FAIL - CANNOT_OPEN_OUTPUTS\n";
         return 4;
@@ -449,6 +468,11 @@ int main(int argc, char** argv) {
         << "Symbol;Timeframe;OOSCandidateFormations;OOSAcceptedZones;"
         << "OOSRejectedGap;Resolved;Reaction;Breakout;ReactionPct;"
         << "CI95LowPct;CI95HighPct;OtherLifecycle\n";
+
+    trade
+        << "Symbol;Timeframe;ClosedTrades;NetPositive;NetNegative;Breakeven;"
+        << "NetPositivePct;GrossProfitPoints;GrossLossPointsAbs;NetPoints;"
+        << "ProfitFactorPoints;AvgNetPoints;AvgReturnPct\n";
 
     failures << "File;Reason\n";
 
@@ -463,6 +487,7 @@ int main(int argc, char** argv) {
 
     Totals total;
     total.bin_files_scanned = files.size();
+    te::TradeStats global_trade;
 
     std::cout
         << "============================================================\n"
@@ -570,6 +595,7 @@ int main(int argc, char** argv) {
         std::uint64_t oos_accepted = 0;
         std::uint64_t oos_rejected_gap = 0;
         Stats stats;
+        te::TradeStats trade_stats;
 
         bool has_oos_calendar = false;
 
@@ -666,15 +692,31 @@ int main(int argc, char** argv) {
             ++total.accepted_oos;
             ++total.oos.accepted;
 
-            const LifecycleResult result =
+            const Evaluation eval =
                 evaluate_lifecycle(
                     data,
                     close_index,
                     e);
 
-            count_result(stats, result);
-            count_result(total.oos, result);
+            count_result(stats, eval.result);
+            count_result(total.oos, eval.result);
+
+            if (eval.outcome_index != ap::CloseIndex::npos()) {
+                trade_stats.add(
+                    te::execute_at_closes(
+                        data.bars,
+                        eval.touch_index,
+                        eval.outcome_index,
+                        e.direction,
+                        data.point));
+            }
         }
+
+        global_trade.closed += trade_stats.closed;
+        global_trade.positive += trade_stats.positive;
+        global_trade.negative += trade_stats.negative;
+        global_trade.breakeven += trade_stats.breakeven;
+        global_trade.sum_return_pct += trade_stats.sum_return_pct;
 
         ++total.series_replayed;
 
@@ -683,6 +725,29 @@ int main(int argc, char** argv) {
         }
 
         ++total.series_with_oos;
+
+        trade
+            << csv_field(data.symbol) << ';'
+            << timeframe_name(data.period_seconds) << ';'
+            << trade_stats.closed << ';'
+            << trade_stats.positive << ';'
+            << trade_stats.negative << ';'
+            << trade_stats.breakeven << ';';
+
+        if (trade_stats.closed > 0) {
+            trade
+                << std::fixed << std::setprecision(9)
+                << trade_stats.positive_pct() << ';'
+                << static_cast<double>(trade_stats.gross_profit_points) << ';'
+                << static_cast<double>(trade_stats.gross_loss_points_abs) << ';'
+                << static_cast<double>(trade_stats.net_points) << ';'
+                << trade_stats.profit_factor_points() << ';'
+                << trade_stats.avg_net_points() << ';'
+                << trade_stats.avg_return_pct();
+        } else {
+            trade << ";;;;;;;";
+        }
+        trade << '\n';
 
         instrument
             << csv_field(data.symbol) << ';'
@@ -724,6 +789,7 @@ int main(int argc, char** argv) {
     }
 
     instrument.close();
+    trade.close();
     failures.close();
 
     std::ofstream summary(
@@ -794,7 +860,27 @@ int main(int argc, char** argv) {
         << "OOS_BREAKOUT_FIRST="
         << total.oos.breakout << '\n'
         << "OOS_OTHER_LIFECYCLE="
-        << total.oos.other() << '\n';
+        << total.oos.other() << '\n'
+        << "TRADE_EMULATION=ON\n"
+        << "TRADE_ENTRY=TOUCH_BAR_CLOSE_CAUSAL\n"
+        << "TRADE_EXIT=FIRST_LATER_CLOSE_OUTSIDE_RECTANGLE\n"
+        << "TRADE_SPREAD=HISTORICAL_XFBAR\n"
+        << "TRADE_COMMISSION=0\n"
+        << "TRADE_SLIPPAGE=0\n"
+        << "TRADE_SWAP=0\n"
+        << "OOS_TRADE_CLOSED=" << global_trade.closed << '\n'
+        << "OOS_TRADE_NET_POSITIVE=" << global_trade.positive << '\n'
+        << "OOS_TRADE_NET_NEGATIVE=" << global_trade.negative << '\n'
+        << "OOS_TRADE_BREAKEVEN=" << global_trade.breakeven << '\n';
+
+    if (global_trade.closed > 0) {
+        summary
+            << std::fixed << std::setprecision(9)
+            << "OOS_TRADE_NET_POSITIVE_PCT="
+            << global_trade.positive_pct() << '\n'
+            << "OOS_TRADE_AVG_RETURN_PCT="
+            << global_trade.avg_return_pct() << '\n';
+    }
 
     if (total.oos.resolved() > 0) {
         summary
@@ -861,6 +947,8 @@ int main(int argc, char** argv) {
     std::cout
         << "OOS_INSTRUMENT_STATS="
         << instrument_path.string() << '\n'
+        << "OOS_TRADE_EMULATION="
+        << trade_path.string() << '\n'
         << "SUMMARY="
         << summary_path.string() << '\n';
 
