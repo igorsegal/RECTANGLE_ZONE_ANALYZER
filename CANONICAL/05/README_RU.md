@@ -93,3 +93,14 @@ signal known at bar close -> execution at next real bar open
 ```
 
 Никакого исполнения по уже известному Close сигнального бара.
+
+
+## OOS reaction levels
+
+Та же замороженная шкала 100/150/200/250/300/350/400/500 points используется в OOS и выводится в:
+
+```text
+05_OOS_REACTION_LEVELS.csv
+```
+
+Метод измерения после просмотра development не меняется.

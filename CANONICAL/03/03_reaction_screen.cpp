@@ -2,6 +2,7 @@
 #include "../02/xfbar_reader.h"
 #include "../abs_track_policy.h"
 #include "../trade_emulator.h"
+#include "../reaction_levels.h"
 
 #include <algorithm>
 #include <cmath>
@@ -19,6 +20,7 @@ namespace fs = std::filesystem;
 using namespace rza::canonical;
 namespace ap = rza::canonical::abs_track;
 namespace te = rza::canonical::trade_emulation;
+namespace rl = rza::canonical::reaction_levels;
 
 namespace {
 
@@ -433,6 +435,9 @@ int main(int argc, char** argv) {
     const fs::path trade_path =
         out_root / "03_TRADE_EMULATION.csv";
 
+    const fs::path reaction_levels_path =
+        out_root / "03_REACTION_LEVELS.csv";
+
     const fs::path failures_path =
         out_root / "03_FAILURES.csv";
 
@@ -447,11 +452,15 @@ int main(int argc, char** argv) {
         trade_path,
         std::ios::binary);
 
+    std::ofstream reaction_levels(
+        reaction_levels_path,
+        std::ios::binary);
+
     std::ofstream failures(
         failures_path,
         std::ios::binary);
 
-    if (!instrument || !trade || !failures) {
+    if (!instrument || !trade || !reaction_levels || !failures) {
         std::cerr
             << "BLOCK03 FAIL - CANNOT_OPEN_OUTPUTS\n";
         return 4;
@@ -467,6 +476,17 @@ int main(int argc, char** argv) {
         << "NetPositivePct;GrossProfitPoints;GrossLossPointsAbs;NetPoints;"
         << "ProfitFactorPoints;AvgNetPoints;AvgReturnPct\n";
 
+    reaction_levels
+        << "Symbol;Timeframe;TouchesMeasured"
+        << ";Hit100;Pct100"
+        << ";Hit150;Pct150"
+        << ";Hit200;Pct200"
+        << ";Hit250;Pct250"
+        << ";Hit300;Pct300"
+        << ";Hit350;Pct350"
+        << ";Hit400;Pct400"
+        << ";Hit500;Pct500\n";
+
     failures << "File;Reason\n";
 
     const auto files =
@@ -481,6 +501,7 @@ int main(int argc, char** argv) {
     Totals total;
     total.bin_files_scanned = files.size();
     te::TradeStats global_trade;
+    rl::Stats global_reaction_levels;
 
     std::cout
         << "============================================================\n"
@@ -583,6 +604,9 @@ int main(int argc, char** argv) {
         const ap::CloseIndex close_index(
             data.bars);
 
+        const rl::HighLowIndex high_low_index(
+            data.bars);
+
         ap::ActiveZones active;
 
         std::uint64_t candidates = 0;
@@ -590,6 +614,7 @@ int main(int argc, char** argv) {
         std::uint64_t rejected_gap = 0;
         Stats stats;
         te::TradeStats trade_stats;
+        rl::Stats reaction_level_stats;
 
         for (std::size_t confirm_idx = 0;
              confirm_idx + 1 < dev_end;
@@ -676,6 +701,19 @@ int main(int argc, char** argv) {
             count_result(stats, eval.result);
             count_result(total.lifecycle, eval.result);
 
+            if (eval.touch_index != ap::CloseIndex::npos()) {
+                reaction_level_stats.add(
+                    rl::max_reaction_points_after_touch(
+                        high_low_index,
+                        eval.touch_index,
+                        break_idx,
+                        dev_end,
+                        e.direction,
+                        e.zone_low,
+                        e.zone_high,
+                        data.point));
+            }
+
             if (eval.outcome_index != ap::CloseIndex::npos()) {
                 trade_stats.add(
                     te::execute_after_close_signals(
@@ -692,6 +730,30 @@ int main(int argc, char** argv) {
         global_trade.negative += trade_stats.negative;
         global_trade.breakeven += trade_stats.breakeven;
         global_trade.sum_return_pct += trade_stats.sum_return_pct;
+        global_reaction_levels.merge(reaction_level_stats);
+
+        reaction_levels
+            << csv_field(data.symbol) << ';'
+            << timeframe_name(data.period_seconds) << ';'
+            << reaction_level_stats.touches;
+
+        for (std::size_t i = 0;
+             i < rl::kLevelsPoints.size();
+             ++i)
+        {
+            reaction_levels
+                << ';'
+                << reaction_level_stats.reached[i]
+                << ';';
+
+            if (reaction_level_stats.touches > 0) {
+                reaction_levels
+                    << std::fixed << std::setprecision(9)
+                    << reaction_level_stats.pct(i);
+            }
+        }
+
+        reaction_levels << '\n';
 
         trade
             << csv_field(data.symbol) << ';'
@@ -761,6 +823,7 @@ int main(int argc, char** argv) {
 
     instrument.close();
     trade.close();
+    reaction_levels.close();
     failures.close();
 
     std::ofstream summary(
@@ -833,7 +896,33 @@ int main(int argc, char** argv) {
         << "TRADE_CLOSED=" << global_trade.closed << '\n'
         << "TRADE_NET_POSITIVE=" << global_trade.positive << '\n'
         << "TRADE_NET_NEGATIVE=" << global_trade.negative << '\n'
-        << "TRADE_BREAKEVEN=" << global_trade.breakeven << '\n';
+        << "TRADE_BREAKEVEN=" << global_trade.breakeven << '\n'
+        << "REACTION_LEVEL_MEASURE=MAX_FAVORABLE_EXCURSION_FROM_OUTER_ZONE_EDGE\n"
+        << "REACTION_LEVEL_START=NEXT_BAR_AFTER_TOUCH_CLOSE\n"
+        << "REACTION_LEVEL_END=ABS_TRACK_ZONE_DELETION_OR_DEV_CUTOFF\n"
+        << "REACTION_LEVEL_TOUCHES=" << global_reaction_levels.touches << '\n';
+
+    for (std::size_t i = 0;
+         i < rl::kLevelsPoints.size();
+         ++i)
+    {
+        summary
+            << "REACTION_REACHED_"
+            << rl::kLevelsPoints[i]
+            << "_POINTS="
+            << global_reaction_levels.reached[i]
+            << '\n';
+
+        if (global_reaction_levels.touches > 0) {
+            summary
+                << std::fixed << std::setprecision(9)
+                << "REACTION_REACHED_"
+                << rl::kLevelsPoints[i]
+                << "_PCT="
+                << global_reaction_levels.pct(i)
+                << '\n';
+        }
+    }
 
     if (global_trade.closed > 0) {
         summary
@@ -912,6 +1001,8 @@ int main(int argc, char** argv) {
         << instrument_path.string() << '\n'
         << "TRADE_EMULATION="
         << trade_path.string() << '\n'
+        << "REACTION_LEVELS="
+        << reaction_levels_path.string() << '\n'
         << "SUMMARY="
         << summary_path.string() << '\n';
 
