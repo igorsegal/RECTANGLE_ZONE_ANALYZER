@@ -445,6 +445,9 @@ int main(int argc, char** argv) {
     const fs::path reaction_levels_path =
         out_root / "05_OOS_REACTION_LEVELS.csv";
 
+    const fs::path oos_reaction_path_path =
+        out_root / "05_OOS_REACTION_PATH.csv";
+
     const fs::path failures_path =
         out_root / "05_FAILURES.csv";
 
@@ -463,11 +466,15 @@ int main(int argc, char** argv) {
         reaction_levels_path,
         std::ios::binary);
 
+    std::ofstream oos_reaction_path(
+        oos_reaction_path_path,
+        std::ios::binary);
+
     std::ofstream failures(
         failures_path,
         std::ios::binary);
 
-    if (!instrument || !trade || !reaction_levels || !failures) {
+    if (!instrument || !trade || !reaction_levels || !oos_reaction_path || !failures) {
         std::cerr
             << "BLOCK05 FAIL - CANNOT_OPEN_OUTPUTS\n";
         return 4;
@@ -494,6 +501,13 @@ int main(int argc, char** argv) {
         << ";Hit400;Pct400"
         << ";Hit500;Pct500\n";
 
+    oos_reaction_path
+        << "Symbol;Timeframe;TargetPoints;TouchesMeasured;Reached;ReachedPct;"
+        << "OneBar;OneBarPctOfReached;AvgBarsToTarget;AvgMAEPoints;"
+        << "MAE0;MAE0Pct;MAE1_50;MAE1_50Pct;MAE51_100;MAE51_100Pct;"
+        << "MAE101_150;MAE101_150Pct;MAE151_200;MAE151_200Pct;"
+        << "MAE201_300;MAE201_300Pct;MAEGT300;MAEGT300Pct\n";
+
     failures << "File;Reason\n";
 
     const auto files =
@@ -509,6 +523,7 @@ int main(int argc, char** argv) {
     total.bin_files_scanned = files.size();
     te::TradeStats global_trade;
     rl::Stats global_reaction_levels;
+    rl::PathStats global_reaction_path;
 
     std::cout
         << "============================================================\n"
@@ -621,6 +636,7 @@ int main(int argc, char** argv) {
         Stats stats;
         te::TradeStats trade_stats;
         rl::Stats reaction_level_stats;
+        rl::PathStats reaction_path_stats;
 
         bool has_oos_calendar = false;
 
@@ -737,6 +753,17 @@ int main(int argc, char** argv) {
                         e.zone_low,
                         e.zone_high,
                         data.point));
+
+                rl::measure_target_paths_after_touch(
+                    high_low_index,
+                    eval.touch_index,
+                    break_idx,
+                    data.bars.size(),
+                    e.direction,
+                    e.zone_low,
+                    e.zone_high,
+                    data.point,
+                    reaction_path_stats);
             }
 
             if (eval.outcome_index != ap::CloseIndex::npos()) {
@@ -756,6 +783,7 @@ int main(int argc, char** argv) {
         global_trade.breakeven += trade_stats.breakeven;
         global_trade.sum_return_pct += trade_stats.sum_return_pct;
         global_reaction_levels.merge(reaction_level_stats);
+        global_reaction_path.merge(reaction_path_stats);
 
         ++total.series_replayed;
 
@@ -787,6 +815,57 @@ int main(int argc, char** argv) {
         }
 
         reaction_levels << '\n';
+
+        for (std::size_t target_i = 0;
+             target_i < rl::kLevelsPoints.size();
+             ++target_i)
+        {
+            const auto& ps =
+                reaction_path_stats.target[target_i];
+
+            oos_reaction_path
+                << csv_field(data.symbol) << ';'
+                << timeframe_name(data.period_seconds) << ';'
+                << rl::kLevelsPoints[target_i] << ';'
+                << reaction_path_stats.touches << ';'
+                << ps.reached << ';';
+
+            if (reaction_path_stats.touches > 0) {
+                oos_reaction_path
+                    << std::fixed << std::setprecision(9)
+                    << reaction_path_stats.reached_pct(target_i);
+            }
+
+            oos_reaction_path
+                << ';'
+                << ps.one_bar
+                << ';';
+
+            if (ps.reached > 0) {
+                oos_reaction_path
+                    << std::fixed << std::setprecision(9)
+                    << ps.one_bar_pct()
+                    << ';'
+                    << ps.avg_bars()
+                    << ';'
+                    << ps.avg_mae();
+
+                for (std::size_t bucket_i = 0;
+                     bucket_i < rl::kMaeBucketCount;
+                     ++bucket_i)
+                {
+                    oos_reaction_path
+                        << ';'
+                        << ps.mae_buckets[bucket_i]
+                        << ';'
+                        << ps.mae_bucket_pct(bucket_i);
+                }
+            } else {
+                oos_reaction_path << ";;;;;;;;;;;;;;;;";
+            }
+
+            oos_reaction_path << '\n';
+        }
 
         trade
             << csv_field(data.symbol) << ';'
@@ -853,6 +932,7 @@ int main(int argc, char** argv) {
     instrument.close();
     trade.close();
     reaction_levels.close();
+    oos_reaction_path.close();
     failures.close();
 
     std::ofstream summary(
@@ -962,6 +1042,46 @@ int main(int argc, char** argv) {
         }
     }
 
+    summary
+        << "REACTION_PATH_MAE_REFERENCE=OUTER_ZONE_EDGE\n"
+        << "REACTION_PATH_MAE_WINDOW=FULLY_COMPLETED_BARS_BEFORE_FIRST_TARGET_HIT_BAR\n"
+        << "REACTION_PATH_HIT_BAR_EXCLUDED_FROM_MAE=1\n";
+
+    for (std::size_t target_i = 0;
+         target_i < rl::kLevelsPoints.size();
+         ++target_i)
+    {
+        const auto& ps =
+            global_reaction_path.target[target_i];
+
+        summary
+            << "REACTION_PATH_TARGET_"
+            << rl::kLevelsPoints[target_i]
+            << "_REACHED="
+            << ps.reached
+            << '\n';
+
+        if (ps.reached > 0) {
+            summary
+                << std::fixed << std::setprecision(9)
+                << "REACTION_PATH_TARGET_"
+                << rl::kLevelsPoints[target_i]
+                << "_ONE_BAR_PCT="
+                << ps.one_bar_pct()
+                << '\n'
+                << "REACTION_PATH_TARGET_"
+                << rl::kLevelsPoints[target_i]
+                << "_AVG_BARS="
+                << ps.avg_bars()
+                << '\n'
+                << "REACTION_PATH_TARGET_"
+                << rl::kLevelsPoints[target_i]
+                << "_AVG_MAE_POINTS="
+                << ps.avg_mae()
+                << '\n';
+        }
+    }
+
     if (global_trade.closed > 0) {
         summary
             << std::fixed << std::setprecision(9)
@@ -1040,6 +1160,8 @@ int main(int argc, char** argv) {
         << trade_path.string() << '\n'
         << "OOS_REACTION_LEVELS="
         << reaction_levels_path.string() << '\n'
+        << "OOS_REACTION_PATH="
+        << oos_reaction_path_path.string() << '\n'
         << "SUMMARY="
         << summary_path.string() << '\n';
 

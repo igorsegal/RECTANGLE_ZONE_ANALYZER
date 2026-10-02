@@ -104,3 +104,14 @@ signal known at bar close -> execution at next real bar open
 ```
 
 Метод измерения после просмотра development не меняется.
+
+
+## OOS trajectory MAE
+
+Block 05 использует ту же замороженную методику `MAE before first target hit + BarsToTarget` и пишет:
+
+```text
+05_OOS_REACTION_PATH.csv
+```
+
+После development правила корзин и определения MAE не меняются.
