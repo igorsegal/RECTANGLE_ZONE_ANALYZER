@@ -69,3 +69,14 @@ The overall summary is secondary and is written to `03_SUMMARY.txt`.
 The old 61.01% result belongs to the previous zone definition and is obsolete.
 
 2024+ remains reserved for the final OOS.
+
+
+## Контроль уникальности и ATR
+
+Каждая пара `Symbol + Timeframe` должна быть уникальной.
+
+Если в базе найдены два полностью одинаковых ряда для одной пары, второй ряд не учитывается повторно и фиксируется как `DUPLICATE_IDENTICAL_SERIES`.
+
+Если для одной пары найдены разные ряды, Block 03 завершится FAIL как `DUPLICATE_SERIES_CONFLICT`.
+
+Если для ряда невозможно получить M5 ATR, этот ряд явно исключается из теста. Использовать только `MinGapPoints` вместо полного правила ABS_TRACK запрещено.
