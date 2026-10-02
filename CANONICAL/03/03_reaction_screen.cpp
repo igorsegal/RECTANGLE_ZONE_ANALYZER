@@ -678,7 +678,7 @@ int main(int argc, char** argv) {
 
             if (eval.outcome_index != ap::CloseIndex::npos()) {
                 trade_stats.add(
-                    te::execute_at_closes(
+                    te::execute_after_close_signals(
                         data.bars,
                         eval.touch_index,
                         eval.outcome_index,
@@ -712,7 +712,7 @@ int main(int argc, char** argv) {
                 << trade_stats.avg_net_points() << ';'
                 << trade_stats.avg_return_pct();
         } else {
-            trade << ";;;;;;;";
+            trade << ";;;;;;";
         }
         trade << '\n';
 
@@ -824,8 +824,8 @@ int main(int argc, char** argv) {
         << "OTHER_LIFECYCLE="
         << total.lifecycle.other() << '\n'
         << "TRADE_EMULATION=ON\n"
-        << "TRADE_ENTRY=TOUCH_BAR_CLOSE_CAUSAL\n"
-        << "TRADE_EXIT=FIRST_LATER_CLOSE_OUTSIDE_RECTANGLE\n"
+        << "TRADE_ENTRY=NEXT_BAR_OPEN_AFTER_TOUCH_CLOSE\n"
+        << "TRADE_EXIT=NEXT_BAR_OPEN_AFTER_OUTCOME_CLOSE\n"
         << "TRADE_SPREAD=HISTORICAL_XFBAR\n"
         << "TRADE_COMMISSION=0\n"
         << "TRADE_SLIPPAGE=0\n"

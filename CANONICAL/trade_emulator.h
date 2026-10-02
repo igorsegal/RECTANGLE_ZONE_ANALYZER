@@ -92,7 +92,7 @@ struct TradeStats {
     }
 };
 
-inline TradeResult execute_at_closes(
+inline TradeResult execute_after_close_signals(
     const std::vector<Bar>& bars,
     std::size_t touch_index,
     std::size_t outcome_index,
@@ -101,44 +101,51 @@ inline TradeResult execute_at_closes(
 {
     TradeResult out;
 
+    // Touch and outcome become known only AFTER their bars close.
+    // Therefore the first causally executable price is the OPEN
+    // of the following real bar.
     if (touch_index >= bars.size() ||
         outcome_index >= bars.size() ||
         outcome_index <= touch_index ||
+        touch_index + 1 >= bars.size() ||
+        outcome_index + 1 >= bars.size() ||
         !(point > 0.0))
     {
         return out;
     }
 
-    const Bar& entry_bar = bars[touch_index];
-    const Bar& exit_bar = bars[outcome_index];
+    const Bar& entry_exec_bar = bars[touch_index + 1];
+    const Bar& exit_exec_bar = bars[outcome_index + 1];
 
     const int entry_spread =
-        entry_bar.spread > 0 ? entry_bar.spread : 0;
+        entry_exec_bar.spread > 0 ? entry_exec_bar.spread : 0;
 
     const int exit_spread =
-        exit_bar.spread > 0 ? exit_bar.spread : 0;
+        exit_exec_bar.spread > 0 ? exit_exec_bar.spread : 0;
 
-    const double entry_bid = entry_bar.close;
-    const double exit_bid = exit_bar.close;
+    const double entry_bid = entry_exec_bar.open;
+    const double exit_bid = exit_exec_bar.open;
 
     out.entry_spread_points = entry_spread;
     out.exit_spread_points = exit_spread;
 
     if (direction == Direction::BULLISH) {
-        // MT4 OHLC is treated as Bid. Buy enters at Ask and exits at Bid.
+        // BUY: decision after touch close, execution next bar at Ask open.
         out.entry_exec_price =
             entry_bid + static_cast<double>(entry_spread) * point;
 
+        // Exit decision after outcome close, execution next bar at Bid open.
         out.exit_exec_price =
             exit_bid;
 
         out.pnl_price =
             out.exit_exec_price - out.entry_exec_price;
     } else {
-        // Sell enters at Bid and exits at Ask.
+        // SELL: decision after touch close, execution next bar at Bid open.
         out.entry_exec_price =
             entry_bid;
 
+        // Exit decision after outcome close, execution next bar at Ask open.
         out.exit_exec_price =
             exit_bid + static_cast<double>(exit_spread) * point;
 
