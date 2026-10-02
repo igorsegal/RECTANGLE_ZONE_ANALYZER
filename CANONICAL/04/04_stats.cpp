@@ -210,7 +210,6 @@ int main(int argc, char** argv) {
     }
 
     const std::vector<std::string> required = {
-        "FormationType",
         "Direction",
         "Timeframe",
         "ProgressBucket",
@@ -226,12 +225,9 @@ int main(int argc, char** argv) {
     }
 
     Stats overall;
-    std::map<std::string, Stats> by_formation;
     std::map<std::string, Stats> by_progress;
     std::map<std::string, Stats> by_direction;
     std::map<std::string, Stats> by_timeframe;
-    std::map<std::string, Stats> by_formation_direction;
-    std::map<std::string, Stats> by_formation_timeframe;
     std::map<std::string, Stats> by_progress_direction;
     std::map<std::string, Stats> by_progress_timeframe;
 
@@ -251,7 +247,6 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        const std::string& formation = f[col["FormationType"]];
         const std::string& direction = f[col["Direction"]];
         const std::string& timeframe = f[col["Timeframe"]];
         const std::string& progress = f[col["ProgressBucket"]];
@@ -260,17 +255,15 @@ int main(int argc, char** argv) {
         ++rows_read;
 
         update(overall, outcome);
-        update(by_formation[formation], outcome);
         update(by_direction[direction], outcome);
         update(by_timeframe[timeframe], outcome);
-        update(by_formation_direction[formation + "|" + direction], outcome);
-        update(by_formation_timeframe[formation + "|" + timeframe], outcome);
 
-        if (formation == "ENGULF_3") {
-            const std::string p = progress.empty() ? "PROGRESS_MISSING" : progress;
-            update(by_progress[p], outcome);
-            update(by_progress_direction[p + "|" + direction], outcome);
-            update(by_progress_timeframe[p + "|" + timeframe], outcome);
+        // All confirmed engulf rectangles are one continuous research stream.
+        // Progress is optional metadata and is grouped only when it is present.
+        if (!progress.empty()) {
+            update(by_progress[progress], outcome);
+            update(by_progress_direction[progress + "|" + direction], outcome);
+            update(by_progress_timeframe[progress + "|" + timeframe], outcome);
         }
     }
 
@@ -280,18 +273,12 @@ int main(int argc, char** argv) {
 
     write_group_csv(groups, "OVERALL", "ALL", overall);
 
-    for (const auto& kv : by_formation)
-        write_group_csv(groups, "FORMATION", kv.first, kv.second);
     for (const auto& kv : by_progress)
         write_group_csv(groups, "ENGULF3_PROGRESS", kv.first, kv.second);
     for (const auto& kv : by_direction)
         write_group_csv(groups, "DIRECTION", kv.first, kv.second);
     for (const auto& kv : by_timeframe)
         write_group_csv(groups, "TIMEFRAME", kv.first, kv.second);
-    for (const auto& kv : by_formation_direction)
-        write_group_csv(groups, "FORMATION_DIRECTION", kv.first, kv.second);
-    for (const auto& kv : by_formation_timeframe)
-        write_group_csv(groups, "FORMATION_TIMEFRAME", kv.first, kv.second);
     for (const auto& kv : by_progress_direction)
         write_group_csv(groups, "ENGULF3_PROGRESS_DIRECTION", kv.first, kv.second);
     for (const auto& kv : by_progress_timeframe)
@@ -310,18 +297,16 @@ int main(int argc, char** argv) {
     summary << "NO_RAW_RESCAN=1\n";
     summary << "ROWS_READ=" << rows_read << "\n";
     summary << "MALFORMED_ROWS=" << malformed << "\n";
+    summary << "STREAM=ALL_CONFIRMED_ENGULF_RECTANGLES\n";
+    summary << "FORMATION_TYPE_USED_FOR_SPLIT=0\n";
     summary << "RATE_DENOMINATOR=REACTION_FIRST+BREAKOUT_FIRST\n";
     summary << "OTHER_LIFECYCLE_EXCLUDED_FROM_RATE=1\n";
     summary << "\n[OVERALL]\n";
     write_stats_line(summary, "ALL", overall);
 
-    summary << "\n[FORMATION]\n";
-    for (const auto& kv : by_formation)
-        write_stats_line(summary, kv.first, kv.second);
-
-    summary << "\n[ENGULF3_PROGRESS]\n";
+    summary << "\n[PROGRESS_WHERE_AVAILABLE]\n";
     static const std::vector<std::string> progress_order = {
-        "P00_25", "P25_50", "P50_75", "P75_90", "P90_100", "PROGRESS_MISSING"
+        "P00_25", "P25_50", "P50_75", "P75_90", "P90_100"
     };
     for (const auto& p : progress_order) {
         const auto it = by_progress.find(p);
@@ -342,6 +327,8 @@ int main(int argc, char** argv) {
     summary << "- This block reads only the frozen Block03 output.\n";
     summary << "- No market BIN file is reopened.\n";
     summary << "- No threshold, filter, TP, SL or parameter is optimized.\n";
+    summary << "- ENGULF_2 and ENGULF_3 are not separate research branches.\n";
+    summary << "- All confirmed engulf rectangles form one continuous stream.\n";
     summary << "- ReactionPct is descriptive development evidence, not trading expectancy.\n";
     summary << "- 2024+ remains reserved for the final independent OOS check.\n";
     summary.close();
@@ -353,18 +340,6 @@ int main(int argc, char** argv) {
     std::cout << "MALFORMED_ROWS=" << malformed << "\n";
     std::cout << std::fixed << std::setprecision(6);
     std::cout << "OVERALL_REACTION_PCT=" << reaction_rate_pct(overall) << "\n";
-
-    const auto e2 = by_formation.find("ENGULF_2");
-    const auto e3 = by_formation.find("ENGULF_3");
-
-    if (e2 != by_formation.end()) {
-        std::cout << "ENGULF_2_REACTION_PCT="
-                  << reaction_rate_pct(e2->second) << "\n";
-    }
-    if (e3 != by_formation.end()) {
-        std::cout << "ENGULF_3_REACTION_PCT="
-                  << reaction_rate_pct(e3->second) << "\n";
-    }
 
     std::cout << "SUMMARY=" << summary_path.string() << "\n";
     std::cout << "GROUPS=" << groups_path.string() << "\n";
