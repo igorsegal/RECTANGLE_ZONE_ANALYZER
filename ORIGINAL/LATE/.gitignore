@@ -1,0 +1,31 @@
+# Build products and compiler intermediates
+/build/
+/src/CMakeFiles/
+/src/CMakeCache.txt
+*.o
+*.obj
+*.exe
+*.pdb
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Runtime logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# Local credentials: this legacy helper currently contains an embedded password.
+/results/fetch_bybit_and_merge.py
+
+# Future v2 generated experiment runs (schemas and fixtures will live elsewhere).
+/results/v2/
+
+# Editor and OS metadata
+.worktrees/
+.vs/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

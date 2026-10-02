@@ -1,0 +1,48 @@
+d:\AHexaTrader\2026.08.18 RECTANGLE_ZONE_ANALYZER\
+├── CMakeLists.txt
+├── README.md
+├── config/
+│   └── optimization_grid.json
+├── src/
+│   ├── main.cpp
+│   ├── core/
+│   │   ├── types.h              ← все структуры
+│   │   ├── params.h             ← параметры системы
+│   │   └── buckets.h            ← бакетизация
+│   ├── io/
+│   │   ├── bin_reader.h/cpp     ← чтение XFBAR
+│   │   ├── csv_writer.h/cpp     ← запись результатов
+│   │   └── config_loader.h/cpp  ← JSON конфиг
+│   ├── indicators/
+│   │   └── atr.h/cpp            ← Wilder ATR
+│   ├── discovery/
+│   │   ├── zones.h/cpp          ← Блок 01
+│   │   ├── touches.h/cpp        ← Блок 02
+│   │   ├── statistics.h/cpp     ← Блок 03
+│   │   ├── ranking.h/cpp        ← Блок 04
+│   │   ├── walkforward.h/cpp    ← Блоки 05-06
+│   │   └── final_rules.h/cpp    ← Блок 07
+│   ├── backtest/
+│   │   ├── engine.h/cpp         ← симулятор сделок
+│   │   ├── position_manager.h/cpp
+│   │   ├── lot_calculator.h/cpp ← $100k, $8/lot, auto params
+│   │   └── metrics.h/cpp        ← equity, drawdown, PF
+│   ├── optimizer/
+│   │   ├── grid_search.h/cpp    ← 2-этапный перебор
+│   │   ├── quality_score.h/cpp  ← PF-based score
+│   │   └── window_manager.h/cpp ← 4-месячные окна
+│   ├── pipeline/
+│   │   ├── task.h/cpp
+│   │   ├── worker.h/cpp
+│   │   └── orchestrator.h/cpp   ← 2 потока + прогресс
+│   └── utils/
+│       ├── progress_bar.h/cpp
+│       └── timer.h/cpp
+├── results/
+│   ├── EURUSD_H1/
+│   │   ├── best_params.csv
+│   │   ├── backtest_report.csv
+│   │   ├── all_trades.csv
+│   │   └── optimization_log.csv
+│   └── ...
+└── build/
