@@ -1,83 +1,45 @@
-# CANONICAL Block 03 — Causal Reaction Screen
+# CANONICAL Block 03 — ABS_TRACK zone policy
 
-Block 03 — первый причинный тест поведения rectangle-zone после формирования.
+Block 03 now uses the rectangle policy from the supplied `ABS_TRACK_v2.mq4`.
 
-Он не является торговым бэктестом: здесь нет входов по цене исполнения, лотов, комиссий, TP/SL и Profit Factor.
+The formation detector remains unified: there is one stream of confirmed engulf rectangles. Formation subtype and progress are not used for analysis.
 
-## Замороженный development-период
+## Ported zone rules
 
-До запуска результата фиксируется:
+- `MinZoneHeightPoints = 225`
+- `DistanceATRTimeframe = M5`
+- `DistanceATRPeriod = 14`
+- `MinGapATR = 0.30`
+- `MinGapPoints = 20`
+- `DeletionThreshold = 10 points`
+- `ReplayHistoricalSpreadPoints = 30`
 
-```text
-DEV_CUTOFF = 2024-01-01T00:00:00Z
-```
-
-В Block 03 не используется ни один outcome, ставший доступным в 2024 году или позже.
-
-Период с 2024 года сохраняется для будущей независимой проверки.
-
-## Вычислительная выборка
-
-Полный Block 02 содержит десятки миллионов formation-событий.
-
-Чтобы не превращать первичный screening в многократный многочасовой проход, Block 03 использует заранее фиксированную детерминированную выборку:
+Required distance:
 
 ```text
-FNV1A64(event_key) % 64 == 0
+required_gap = max(20 * Point, 0.30 * ATR(M5,14))
 ```
 
-Ожидаемая доля — около 1/64 всех development-событий.
+A new rectangle is accepted only if it is far enough from every still-active rectangle of the same direction.
 
-Hash использует только идентичность события, а не его будущее поведение. Поэтому outcome не участвует в отборе.
-
-## Канонический жизненный цикл зоны
-
-Для каждого выбранного formation-события:
-
-1. Зона известна только после закрытия confirmation-бара.
-2. Ждём первый close вне rectangle.
-3. Если первым произошло движение через противоположную границу, результат:
-   `BROKEN_BEFORE_EXPECTED_DEPARTURE`.
-4. Если close вышел через ожидаемую сторону, фиксируем `departure`.
-5. После departure ищем первый close, вернувшийся к rectangle.
-6. Если цена сразу перескочила через rectangle и закрылась за противоположной границей:
-   `DIRECT_BREAKOUT_NO_CLOSE_TOUCH`.
-7. Если close оказался внутри `[zone_low, zone_high]`, это канонический `CLOSE_REENTRY` touch.
-8. После touch ищем первый последующий close вне rectangle:
-   - ожидаемая сторона → `REACTION_FIRST`;
-   - противоположная сторона → `BREAKOUT_FIRST`.
-
-Если нужное событие не произошло до development cutoff, оно получает соответствующий censored-статус.
-
-## Почему touch определяется по close
-
-Это намеренно строгая первая гипотеза:
+An active bullish rectangle is removed after a bar closes below:
 
 ```text
-TOUCH = CLOSE_REENTRY_AFTER_EXPECTED_DEPARTURE
+zone_low - 10 * Point
 ```
 
-Wick-only касания в эту гипотезу не добавляются после просмотра результата.
-
-Если их понадобится исследовать, это будет отдельная заранее зарегистрированная гипотеза.
-
-## Почему реакция/пробой не используют ATR
-
-Rectangle сам задаёт две естественные границы. Поэтому первичный outcome:
+A bearish rectangle is removed after a bar closes above:
 
 ```text
-FIRST_CLOSE_OUTSIDE_RECTANGLE_AFTER_TOUCH
+zone_high + 10 * Point
 ```
 
-не содержит оптимизируемого расстояния, ATR-множителя или TP/SL.
+Zone bounds also follow `CalculateZoneBounds()` from ABS_TRACK, including the 225-point minimum-height rule and the 30-point historical spread floor.
 
-## Выходы
+## Development sample
 
-`CANONICAL/03out`:
+The distance/deletion state is replayed on ALL candidate formations.
 
-- `03_REACTION_SCREEN.csv` — выбранные formation-события и их causal lifecycle;
-- `03_FILE_SUMMARY.csv` — техническая сводка по файлам;
-- `03_FAILURES.csv` — только реальные ошибки XFBAR;
-- `03_SUMMARY.txt` — общий контрольный итог.
+Only after a zone is accepted is the existing deterministic 1/64 development sample applied to the reaction/breakout screen.
 
-Block 04 будет работать только с замороженным выходом Block 03 и сравнит `ENGULF_2`, `ENGULF_3` и заранее заданные progress-группы без изменения определения touch/outcome.
+This preserves exact active-zone state while keeping the development event file compact.

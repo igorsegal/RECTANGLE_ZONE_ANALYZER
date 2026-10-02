@@ -1,65 +1,24 @@
-# CANONICAL Block 05 — Final OOS 2024+
+# CANONICAL Block 05 — Final OOS with ABS_TRACK policy
 
-Это финальная независимая проверка структурной гипотезы RZA.
+Final OOS uses the same unified rectangle stream and the zone rules ported from `ABS_TRACK_v2.mq4`.
 
-## Что проверяется
+## Important
 
-Один непрерывный поток подтверждённых engulf-прямоугольников:
+Before testing 2024+ events, Block 05 replays the full earlier history causally so that active old rectangles can correctly block a new same-direction rectangle.
 
-```text
-formation -> rectangle -> touch -> reaction / breakout
-```
+## Ported rules
 
-Разделение на ENGULF_2 / ENGULF_3 отключено.
+- minimum zone-height rule: 225 points;
+- minimum same-direction gap: max(20 points, 0.30 × ATR(M5,14));
+- zone deletion after close 10 points beyond the opposite boundary;
+- historical spread floor: 30 points.
 
-Progress полностью отключён.
+Formation subtype and progress are not used.
 
-## OOS
+## OOS sampling
 
-```text
-OOS_START = 2024-01-01T00:00:00Z
-```
+There is no 1/64 reduction in final OOS.
 
-Для ускорения используется заранее фиксированная детерминированная выборка:
+Every accepted 2024+ rectangle is evaluated.
 
-```text
-FNV1A64(event_key) % 64 == 0
-```
-
-В event_key входят только:
-
-- файл;
-- символ;
-- таймфрейм;
-- время source-бара;
-- время confirmation-бара;
-- направление.
-
-Formation type и progress в выборке не участвуют.
-
-## Ресурсы
-
-Block 05 не пишет гигантский event CSV.
-
-Он создаёт только:
-
-- `05_OOS_SUMMARY.txt`;
-- `05_FAILURES.csv`.
-
-То есть финальный прогон тратит ресурсы только на необходимую проверку.
-
-## Замороженный structural gate
-
-Гипотеза считается подтверждённой только если нижняя граница Wilson 95% CI для ReactionPct выше 50%:
-
-1. по общему потоку;
-2. отдельно для BULLISH;
-3. отдельно для BEARISH.
-
-```text
-STRUCTURAL_HYPOTHESIS_GATE=PASS / FAIL
-```
-
-Это gate структурной закономерности, а не доказательство прибыльности торговой системы.
-
-Определения touch/reaction/breakout остаются теми же, что в Block 03.
+The output is summary-only, so no giant OOS event CSV is written.

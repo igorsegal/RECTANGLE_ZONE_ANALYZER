@@ -1,5 +1,6 @@
 #include "../01/formation_detector.h"
 #include "../02/xfbar_reader.h"
+#include "../abs_track_policy.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -7,20 +8,19 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
 
 namespace fs = std::filesystem;
 using namespace rza::canonical;
+namespace ap = rza::canonical::abs_track;
 
 namespace {
 
-constexpr std::int64_t DEV_CUTOFF_UTC = 1704067200LL; // 2024-01-01T00:00:00Z
+constexpr std::int64_t DEV_CUTOFF_UTC = 1704067200LL;
 constexpr std::uint64_t SAMPLE_MODULUS = 64;
 constexpr std::uint64_t SAMPLE_FOLD = 0;
-constexpr std::size_t NPOS = std::numeric_limits<std::size_t>::max();
 
 enum class LifecycleResult {
     NO_OUTSIDE_BEFORE_CUTOFF,
@@ -52,150 +52,23 @@ const char* lifecycle_name(LifecycleResult r) {
     return "UNKNOWN";
 }
 
-const char* formation_name(FormationType t) {
-    return t == FormationType::ENGULF_2 ? "ENGULF_2" : "ENGULF_3";
-}
-
 const char* direction_name(Direction d) {
     return d == Direction::BULLISH ? "BULLISH" : "BEARISH";
-}
-
-int progress_bucket(double p) {
-    if (p < 25.0) return 0;
-    if (p < 50.0) return 1;
-    if (p < 75.0) return 2;
-    if (p < 90.0) return 3;
-    return 4;
-}
-
-const char* progress_bucket_name(int b) {
-    static const char* names[5] = {
-        "P00_25", "P25_50", "P50_75", "P75_90", "P90_100"
-    };
-    return names[b];
 }
 
 std::string csv_field(const std::string& s) {
     if (s.find_first_of(";\"\r\n") == std::string::npos) {
         return s;
     }
+
     std::string out = "\"";
     for (char c : s) {
-        if (c == '\"') out += "\"\"";
+        if (c == '"') out += "\"\"";
         else out += c;
     }
-    out += '\"';
+    out += '"';
     return out;
 }
-
-class RangeIndex {
-public:
-    explicit RangeIndex(const std::vector<Bar>& bars) {
-        size_ = 1;
-        while (size_ < bars.size()) size_ <<= 1;
-
-        mins_.assign(size_ * 2, std::numeric_limits<double>::infinity());
-        maxs_.assign(size_ * 2, -std::numeric_limits<double>::infinity());
-
-        for (std::size_t i = 0; i < bars.size(); ++i) {
-            mins_[size_ + i] = bars[i].close;
-            maxs_[size_ + i] = bars[i].close;
-        }
-
-        for (std::size_t i = size_; i-- > 1;) {
-            mins_[i] = std::min(mins_[i * 2], mins_[i * 2 + 1]);
-            maxs_[i] = std::max(maxs_[i * 2], maxs_[i * 2 + 1]);
-        }
-    }
-
-    std::size_t first_outside(
-        std::size_t begin,
-        std::size_t end,
-        double low,
-        double high) const
-    {
-        if (begin >= end) return NPOS;
-        return find_outside(1, 0, size_, begin, end, low, high);
-    }
-
-    std::size_t first_le(
-        std::size_t begin,
-        std::size_t end,
-        double threshold) const
-    {
-        if (begin >= end) return NPOS;
-        return find_le(1, 0, size_, begin, end, threshold);
-    }
-
-    std::size_t first_ge(
-        std::size_t begin,
-        std::size_t end,
-        double threshold) const
-    {
-        if (begin >= end) return NPOS;
-        return find_ge(1, 0, size_, begin, end, threshold);
-    }
-
-private:
-    std::size_t size_ = 1;
-    std::vector<double> mins_;
-    std::vector<double> maxs_;
-
-    std::size_t find_outside(
-        std::size_t node,
-        std::size_t nl,
-        std::size_t nr,
-        std::size_t ql,
-        std::size_t qr,
-        double low,
-        double high) const
-    {
-        if (nr <= ql || qr <= nl) return NPOS;
-        if (maxs_[node] <= high && mins_[node] >= low) return NPOS;
-        if (nr - nl == 1) return nl;
-
-        const std::size_t mid = nl + (nr - nl) / 2;
-        const auto left = find_outside(node * 2, nl, mid, ql, qr, low, high);
-        if (left != NPOS) return left;
-        return find_outside(node * 2 + 1, mid, nr, ql, qr, low, high);
-    }
-
-    std::size_t find_le(
-        std::size_t node,
-        std::size_t nl,
-        std::size_t nr,
-        std::size_t ql,
-        std::size_t qr,
-        double threshold) const
-    {
-        if (nr <= ql || qr <= nl) return NPOS;
-        if (mins_[node] > threshold) return NPOS;
-        if (nr - nl == 1) return nl;
-
-        const std::size_t mid = nl + (nr - nl) / 2;
-        const auto left = find_le(node * 2, nl, mid, ql, qr, threshold);
-        if (left != NPOS) return left;
-        return find_le(node * 2 + 1, mid, nr, ql, qr, threshold);
-    }
-
-    std::size_t find_ge(
-        std::size_t node,
-        std::size_t nl,
-        std::size_t nr,
-        std::size_t ql,
-        std::size_t qr,
-        double threshold) const
-    {
-        if (nr <= ql || qr <= nl) return NPOS;
-        if (maxs_[node] < threshold) return NPOS;
-        if (nr - nl == 1) return nl;
-
-        const std::size_t mid = nl + (nr - nl) / 2;
-        const auto left = find_ge(node * 2, nl, mid, ql, qr, threshold);
-        if (left != NPOS) return left;
-        return find_ge(node * 2 + 1, mid, nr, ql, qr, threshold);
-    }
-};
 
 std::uint64_t fnv1a64(const std::string& s) {
     std::uint64_t h = 14695981039346656037ULL;
@@ -218,7 +91,6 @@ std::string event_key(
         << data.period_seconds << '|'
         << data.bars[e.source_index].time << '|'
         << data.bars[e.confirmation_index].time << '|'
-        << static_cast<int>(e.type) << '|'
         << static_cast<int>(e.direction);
     return oss.str();
 }
@@ -233,15 +105,18 @@ std::vector<std::string> find_bin_files(const fs::path& root) {
              ec),
          end;
          it != end;
-         it.increment(ec)) {
+         it.increment(ec))
+    {
         if (ec) {
             ec.clear();
             continue;
         }
+
         if (!it->is_regular_file(ec)) {
             ec.clear();
             continue;
         }
+
         if (it->path().extension() == ".bin") {
             files.push_back(it->path().string());
         }
@@ -263,7 +138,67 @@ std::size_t development_end_exclusive(const XfbarData& data) {
             return bar.time < value;
         });
 
-    return static_cast<std::size_t>(std::distance(data.bars.begin(), it));
+    return static_cast<std::size_t>(
+        std::distance(data.bars.begin(), it));
+}
+
+LifecycleResult evaluate_lifecycle(
+    const XfbarData& data,
+    const ap::CloseIndex& index,
+    const FormationEvent& e,
+    std::size_t dev_end)
+{
+    const std::size_t begin = e.confirmation_index + 1;
+    const double low = e.zone_low;
+    const double high = e.zone_high;
+    const bool bullish = e.direction == Direction::BULLISH;
+
+    const std::size_t first_out =
+        index.first_outside(begin, dev_end, low, high);
+
+    if (first_out == ap::CloseIndex::npos()) {
+        return LifecycleResult::NO_OUTSIDE_BEFORE_CUTOFF;
+    }
+
+    const double first_close = data.bars[first_out].close;
+    const bool expected_side =
+        bullish ? (first_close > high) : (first_close < low);
+
+    if (!expected_side) {
+        return LifecycleResult::BROKEN_BEFORE_EXPECTED_DEPARTURE;
+    }
+
+    const std::size_t return_idx =
+        bullish
+            ? index.first_le(first_out + 1, dev_end, high)
+            : index.first_ge(first_out + 1, dev_end, low);
+
+    if (return_idx == ap::CloseIndex::npos()) {
+        return LifecycleResult::NO_RETURN_BEFORE_CUTOFF;
+    }
+
+    const double return_close = data.bars[return_idx].close;
+    const bool inside =
+        return_close >= low && return_close <= high;
+
+    if (!inside) {
+        return LifecycleResult::DIRECT_BREAKOUT_NO_CLOSE_TOUCH;
+    }
+
+    const std::size_t out_after_touch =
+        index.first_outside(return_idx + 1, dev_end, low, high);
+
+    if (out_after_touch == ap::CloseIndex::npos()) {
+        return LifecycleResult::TOUCH_UNRESOLVED_AT_CUTOFF;
+    }
+
+    const double outcome_close = data.bars[out_after_touch].close;
+    const bool reaction_side =
+        bullish ? (outcome_close > high) : (outcome_close < low);
+
+    return reaction_side
+        ? LifecycleResult::REACTION_FIRST
+        : LifecycleResult::BREAKOUT_FIRST;
 }
 
 struct Totals {
@@ -271,11 +206,12 @@ struct Totals {
     std::uint64_t files_passed = 0;
     std::uint64_t files_failed = 0;
     std::uint64_t skipped_non_xfbar = 0;
+    std::uint64_t m5_atr_missing_files = 0;
 
     std::uint64_t formations_dev = 0;
+    std::uint64_t accepted_zones_dev = 0;
+    std::uint64_t rejected_gap_dev = 0;
     std::uint64_t selected = 0;
-    std::uint64_t selected_e2 = 0;
-    std::uint64_t selected_e3 = 0;
 
     std::uint64_t no_outside = 0;
     std::uint64_t broken_before_departure = 0;
@@ -288,28 +224,71 @@ struct Totals {
 
 void count_result(Totals& t, LifecycleResult r) {
     switch (r) {
-        case LifecycleResult::NO_OUTSIDE_BEFORE_CUTOFF: ++t.no_outside; break;
+        case LifecycleResult::NO_OUTSIDE_BEFORE_CUTOFF:
+            ++t.no_outside; break;
         case LifecycleResult::BROKEN_BEFORE_EXPECTED_DEPARTURE:
             ++t.broken_before_departure; break;
-        case LifecycleResult::NO_RETURN_BEFORE_CUTOFF: ++t.no_return; break;
+        case LifecycleResult::NO_RETURN_BEFORE_CUTOFF:
+            ++t.no_return; break;
         case LifecycleResult::DIRECT_BREAKOUT_NO_CLOSE_TOUCH:
             ++t.direct_breakout; break;
-        case LifecycleResult::REACTION_FIRST: ++t.reaction_first; break;
-        case LifecycleResult::BREAKOUT_FIRST: ++t.breakout_first; break;
+        case LifecycleResult::REACTION_FIRST:
+            ++t.reaction_first; break;
+        case LifecycleResult::BREAKOUT_FIRST:
+            ++t.breakout_first; break;
         case LifecycleResult::TOUCH_UNRESOLVED_AT_CUTOFF:
             ++t.touch_unresolved; break;
     }
+}
+
+bool build_atr_lookup(
+    const std::string& current_file,
+    const XfbarData& data,
+    ap::AtrLookup& out)
+{
+    const auto& p = ap::params();
+
+    if (data.period_seconds == p.atr_timeframe_seconds) {
+        out.build(data.bars, p.atr_period);
+        return out.available();
+    }
+
+    const fs::path m5 =
+        ap::find_m5_sibling(fs::path(current_file), data.symbol);
+
+    if (m5.empty()) {
+        out = ap::AtrLookup{};
+        return false;
+    }
+
+    const auto m5_data = read_xfbar(m5.string());
+
+    if (!m5_data.success ||
+        m5_data.period_seconds != p.atr_timeframe_seconds)
+    {
+        out = ap::AtrLookup{};
+        return false;
+    }
+
+    out.build(m5_data.bars, p.atr_period);
+    return out.available();
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
     const fs::path data_root =
-        argc >= 2 ? fs::path(argv[1]) : fs::path("D:/AHexaTrader/1DataFiles/raw");
+        argc >= 2
+            ? fs::path(argv[1])
+            : fs::path("D:/AHexaTrader/1DataFiles/raw");
+
     const fs::path out_root =
-        argc >= 3 ? fs::path(argv[2]) : fs::path("../03out");
+        argc >= 3
+            ? fs::path(argv[2])
+            : fs::path("../03out");
 
     std::error_code ec;
+
     if (!fs::exists(data_root, ec) || !fs::is_directory(data_root, ec)) {
         std::cerr << "BLOCK03 FAIL - DATA_ROOT_NOT_FOUND\n";
         return 2;
@@ -336,23 +315,27 @@ int main(int argc, char** argv) {
     }
 
     events
-        << "EventKey;ResearchFold;File;Symbol;Timeframe;FormationType;Direction;"
+        << "EventKey;File;Symbol;Timeframe;Direction;"
         << "SourceTime;ConfirmBarTime;AvailableAt;ZoneLow;ZoneHigh;"
-        << "ProgressPct;ProgressBucket;DepartureTime;TouchTime;OutcomeTime;"
-        << "BarsToDeparture;BarsToTouch;BarsTouchToOutcome;LifecycleResult\n";
+        << "RequiredGap;DepartureTime;TouchTime;OutcomeTime;"
+        << "LifecycleResult\n";
 
     file_summary
-        << "File;Symbol;Timeframe;DevFormations;SelectedFold0;"
-        << "ReactionFirst;BreakoutFirst;OtherLifecycle\n";
+        << "File;Symbol;Timeframe;DevFormations;AcceptedZones;"
+        << "RejectedGap;Selected;ReactionFirst;BreakoutFirst;OtherLifecycle;"
+        << "M5AtrAvailable\n";
 
     failures << "File;Reason\n";
 
     std::cout << "============================================================\n";
-    std::cout << "RZA CANONICAL BLOCK 03 - CAUSAL REACTION SCREEN\n";
+    std::cout << "RZA CANONICAL BLOCK 03 - ABS_TRACK ZONE POLICY\n";
     std::cout << "DEV_CUTOFF=2024-01-01T00:00:00Z\n";
-    std::cout << "SAMPLE=FNV1A64 %% 64 == 0\n";
-    std::cout << "TOUCH=CLOSE_REENTRY_AFTER_EXPECTED_DEPARTURE\n";
-    std::cout << "OUTCOME=FIRST_CLOSE_OUTSIDE_RECTANGLE\n";
+    std::cout << "STREAM=ALL_CONFIRMED_ENGULF_RECTANGLES\n";
+    std::cout << "MIN_ZONE_HEIGHT_POINTS=225\n";
+    std::cout << "MIN_GAP=max(20 points, 0.30 * ATR(M5,14))\n";
+    std::cout << "DELETE=10 points beyond opposite boundary by close\n";
+    std::cout << "HISTORICAL_SPREAD_FLOOR=30 points\n";
+    std::cout << "SAMPLE=FNV1A64 %% 64 == 0 AFTER ZONE ACCEPTANCE\n";
     std::cout << "============================================================\n";
 
     const auto files = find_bin_files(data_root);
@@ -381,20 +364,35 @@ int main(int argc, char** argv) {
 
         ++total.files_passed;
 
-        const auto dev_end = development_end_exclusive(data);
-        if (dev_end < 3) {
-            file_summary
+        if (!(data.point > 0.0)) {
+            ++total.files_failed;
+            failures
                 << csv_field(files[file_idx]) << ';'
-                << csv_field(data.symbol) << ';'
-                << timeframe_name(data.period_seconds)
-                << ";0;0;0;0;0\n";
+                << "nonpositive_point\n";
             continue;
         }
 
-        const RangeIndex index(data.bars);
-        const auto formations = detect_all(data.bars);
+        const std::size_t dev_end =
+            development_end_exclusive(data);
 
-        std::uint64_t one_dev = 0;
+        if (dev_end < 3) {
+            continue;
+        }
+
+        ap::AtrLookup atr;
+        const bool atr_available =
+            build_atr_lookup(files[file_idx], data, atr);
+
+        if (!atr_available) {
+            ++total.m5_atr_missing_files;
+        }
+
+        const ap::CloseIndex index(data.bars);
+        ap::ActiveZones active;
+
+        std::uint64_t one_formations = 0;
+        std::uint64_t one_accepted = 0;
+        std::uint64_t one_rejected_gap = 0;
         std::uint64_t one_selected = 0;
         std::uint64_t one_reaction = 0;
         std::uint64_t one_breakout = 0;
@@ -403,93 +401,106 @@ int main(int argc, char** argv) {
         std::string relative_file;
         {
             std::error_code rel_ec;
-            relative_file = fs::relative(files[file_idx], data_root, rel_ec).generic_string();
-            if (rel_ec) relative_file = fs::path(files[file_idx]).filename().generic_string();
+            relative_file =
+                fs::relative(
+                    files[file_idx],
+                    data_root,
+                    rel_ec).generic_string();
+
+            if (rel_ec) {
+                relative_file =
+                    fs::path(files[file_idx]).filename().generic_string();
+            }
         }
 
-        for (const auto& e : formations) {
-            if (e.confirmation_index >= dev_end) continue;
+        for (std::size_t confirm_idx = 0;
+             confirm_idx < dev_end;
+             ++confirm_idx)
+        {
+            const std::int64_t available_at =
+                data.bars[confirm_idx].time + data.period_seconds;
 
-            const auto available_at =
-                data.bars[e.confirmation_index].time + data.period_seconds;
-            if (available_at >= DEV_CUTOFF_UTC) continue;
+            if (available_at >= DEV_CUTOFF_UTC) {
+                break;
+            }
 
+            active.expire(confirm_idx);
+
+            const auto e_opt =
+                detect_at(data.bars, confirm_idx);
+
+            if (!e_opt.has_value()) {
+                continue;
+            }
+
+            FormationEvent e = *e_opt;
             ++total.formations_dev;
-            ++one_dev;
+            ++one_formations;
 
-            const std::string key = event_key(relative_file, data, e);
-            const std::uint64_t hash = fnv1a64(key);
-            const std::uint64_t fold = hash % SAMPLE_MODULUS;
-            if (fold != SAMPLE_FOLD) continue;
+            const ap::ZoneBounds z =
+                ap::calculate_zone_bounds(
+                    data.bars[e.source_index],
+                    e.direction,
+                    data.point);
+
+            e.zone_low = z.low;
+            e.zone_high = z.high;
+
+            const double atr_value =
+                atr.at_decision(available_at);
+
+            const double req_gap =
+                ap::required_gap(data.point, atr_value);
+
+            if (!active.can_accept(
+                    e.direction,
+                    e.zone_low,
+                    e.zone_high,
+                    req_gap))
+            {
+                ++total.rejected_gap_dev;
+                ++one_rejected_gap;
+                continue;
+            }
+
+            const std::size_t break_idx =
+                ap::zone_break_index(
+                    index,
+                    data.bars,
+                    confirm_idx,
+                    e.direction,
+                    e.zone_low,
+                    e.zone_high,
+                    data.point);
+
+            active.insert(
+                e.direction,
+                e.zone_low,
+                e.zone_high,
+                break_idx);
+
+            ++total.accepted_zones_dev;
+            ++one_accepted;
+
+            const std::string key =
+                event_key(relative_file, data, e);
+
+            if ((fnv1a64(key) % SAMPLE_MODULUS) != SAMPLE_FOLD) {
+                continue;
+            }
 
             ++total.selected;
             ++one_selected;
-            if (e.type == FormationType::ENGULF_2) ++total.selected_e2;
-            else ++total.selected_e3;
 
-            const std::size_t search_begin = e.confirmation_index + 1;
-            const double low = e.zone_low;
-            const double high = e.zone_high;
-            const bool bullish = e.direction == Direction::BULLISH;
-
-            std::size_t departure = NPOS;
-            std::size_t touch = NPOS;
-            std::size_t outcome = NPOS;
-
-            LifecycleResult result = LifecycleResult::NO_OUTSIDE_BEFORE_CUTOFF;
-
-            const std::size_t first_out =
-                index.first_outside(search_begin, dev_end, low, high);
-
-            if (first_out == NPOS) {
-                result = LifecycleResult::NO_OUTSIDE_BEFORE_CUTOFF;
-            } else {
-                const double c = data.bars[first_out].close;
-                const bool expected_side =
-                    bullish ? (c > high) : (c < low);
-
-                if (!expected_side) {
-                    result = LifecycleResult::BROKEN_BEFORE_EXPECTED_DEPARTURE;
-                } else {
-                    departure = first_out;
-
-                    const std::size_t return_idx =
-                        bullish
-                            ? index.first_le(departure + 1, dev_end, high)
-                            : index.first_ge(departure + 1, dev_end, low);
-
-                    if (return_idx == NPOS) {
-                        result = LifecycleResult::NO_RETURN_BEFORE_CUTOFF;
-                    } else {
-                        const double rc = data.bars[return_idx].close;
-                        const bool inside = rc >= low && rc <= high;
-
-                        if (!inside) {
-                            result = LifecycleResult::DIRECT_BREAKOUT_NO_CLOSE_TOUCH;
-                        } else {
-                            touch = return_idx;
-
-                            const std::size_t out_after_touch =
-                                index.first_outside(touch + 1, dev_end, low, high);
-
-                            if (out_after_touch == NPOS) {
-                                result = LifecycleResult::TOUCH_UNRESOLVED_AT_CUTOFF;
-                            } else {
-                                outcome = out_after_touch;
-                                const double oc = data.bars[outcome].close;
-                                const bool reaction_side =
-                                    bullish ? (oc > high) : (oc < low);
-
-                                result = reaction_side
-                                    ? LifecycleResult::REACTION_FIRST
-                                    : LifecycleResult::BREAKOUT_FIRST;
-                            }
-                        }
-                    }
-                }
-            }
+            const LifecycleResult result =
+                evaluate_lifecycle(
+                    data,
+                    index,
+                    e,
+                    dev_end);
 
             count_result(total, result);
+
             if (result == LifecycleResult::REACTION_FIRST) {
                 ++one_reaction;
             } else if (result == LifecycleResult::BREAKOUT_FIRST) {
@@ -498,50 +509,83 @@ int main(int argc, char** argv) {
                 ++one_other;
             }
 
+            std::size_t departure = ap::CloseIndex::npos();
+            std::size_t touch = ap::CloseIndex::npos();
+            std::size_t outcome = ap::CloseIndex::npos();
+
+            const bool bullish =
+                e.direction == Direction::BULLISH;
+
+            departure =
+                index.first_outside(
+                    e.confirmation_index + 1,
+                    dev_end,
+                    e.zone_low,
+                    e.zone_high);
+
+            if (departure != ap::CloseIndex::npos()) {
+                const double dc = data.bars[departure].close;
+                const bool expected =
+                    bullish
+                        ? dc > e.zone_high
+                        : dc < e.zone_low;
+
+                if (expected) {
+                    const std::size_t r =
+                        bullish
+                            ? index.first_le(
+                                  departure + 1,
+                                  dev_end,
+                                  e.zone_high)
+                            : index.first_ge(
+                                  departure + 1,
+                                  dev_end,
+                                  e.zone_low);
+
+                    if (r != ap::CloseIndex::npos()) {
+                        const double rc = data.bars[r].close;
+
+                        if (rc >= e.zone_low &&
+                            rc <= e.zone_high)
+                        {
+                            touch = r;
+                            outcome =
+                                index.first_outside(
+                                    touch + 1,
+                                    dev_end,
+                                    e.zone_low,
+                                    e.zone_high);
+                        }
+                    }
+                }
+            }
+
             events
                 << csv_field(key) << ';'
-                << fold << ';'
                 << csv_field(relative_file) << ';'
                 << csv_field(data.symbol) << ';'
                 << timeframe_name(data.period_seconds) << ';'
-                << formation_name(e.type) << ';'
                 << direction_name(e.direction) << ';'
                 << data.bars[e.source_index].time << ';'
                 << data.bars[e.confirmation_index].time << ';'
                 << available_at << ';'
                 << std::setprecision(17)
-                << low << ';'
-                << high << ';';
+                << e.zone_low << ';'
+                << e.zone_high << ';'
+                << req_gap << ';';
 
-            if (e.has_first_bar_progress) {
-                events
-                    << e.first_bar_progress_pct << ';'
-                    << progress_bucket_name(progress_bucket(e.first_bar_progress_pct));
-            } else {
-                events << ';';
-            }
-
-            events << ';';
-
-            if (departure != NPOS) events << data.bars[departure].time;
-            events << ';';
-            if (touch != NPOS) events << data.bars[touch].time;
-            events << ';';
-            if (outcome != NPOS) events << data.bars[outcome].time;
-            events << ';';
-
-            if (departure != NPOS) {
-                events << (departure - e.confirmation_index);
+            if (departure != ap::CloseIndex::npos()) {
+                events << data.bars[departure].time;
             }
             events << ';';
 
-            if (touch != NPOS && departure != NPOS) {
-                events << (touch - departure);
+            if (touch != ap::CloseIndex::npos()) {
+                events << data.bars[touch].time;
             }
             events << ';';
 
-            if (outcome != NPOS && touch != NPOS) {
-                events << (outcome - touch);
+            if (outcome != ap::CloseIndex::npos()) {
+                events << data.bars[outcome].time;
             }
             events << ';';
 
@@ -552,21 +596,31 @@ int main(int argc, char** argv) {
             << csv_field(relative_file) << ';'
             << csv_field(data.symbol) << ';'
             << timeframe_name(data.period_seconds) << ';'
-            << one_dev << ';'
+            << one_formations << ';'
+            << one_accepted << ';'
+            << one_rejected_gap << ';'
             << one_selected << ';'
             << one_reaction << ';'
             << one_breakout << ';'
-            << one_other << '\n';
+            << one_other << ';'
+            << (atr_available ? 1 : 0)
+            << '\n';
 
-        if ((file_idx + 1) % 25 == 0 || file_idx + 1 == files.size()) {
+        if ((file_idx + 1) % 25 == 0 ||
+            file_idx + 1 == files.size())
+        {
             std::cout
-                << '[' << (file_idx + 1) << '/' << files.size() << "] "
-                << data.symbol << '_' << timeframe_name(data.period_seconds)
+                << '[' << (file_idx + 1)
+                << '/' << files.size() << "] "
+                << data.symbol << '_'
+                << timeframe_name(data.period_seconds)
+                << " accepted=" << total.accepted_zones_dev
+                << " rejected_gap=" << total.rejected_gap_dev
                 << " selected=" << total.selected
                 << " reaction=" << total.reaction_first
                 << " breakout=" << total.breakout_first
                 << " failed=" << total.files_failed
-                << "\n";
+                << '\n';
         }
     }
 
@@ -580,28 +634,39 @@ int main(int argc, char** argv) {
         return 6;
     }
 
-    summary << "RZA CANONICAL BLOCK 03 - CAUSAL REACTION SCREEN\n";
+    summary << "RZA CANONICAL BLOCK 03 - ABS_TRACK ZONE POLICY\n";
     summary << "DEV_CUTOFF_UTC=2024-01-01T00:00:00Z\n";
+    summary << "STREAM=ALL_CONFIRMED_ENGULF_RECTANGLES\n";
+    summary << "FORMATION_TYPE_USED_FOR_SPLIT=0\n";
+    summary << "PROGRESS_USED=0\n";
+    summary << "MIN_ZONE_HEIGHT_POINTS=225\n";
+    summary << "MIN_GAP_POINTS=20\n";
+    summary << "MIN_GAP_ATR=0.30\n";
+    summary << "DISTANCE_ATR_TIMEFRAME=M5\n";
+    summary << "DISTANCE_ATR_PERIOD=14\n";
+    summary << "DELETION_THRESHOLD_POINTS=10\n";
+    summary << "HISTORICAL_SPREAD_POINTS=30\n";
     summary << "SAMPLE_MODULUS=" << SAMPLE_MODULUS << "\n";
     summary << "SAMPLE_FOLD=" << SAMPLE_FOLD << "\n";
     summary << "FILES_FOUND=" << total.files_found << "\n";
     summary << "FILES_PASSED=" << total.files_passed << "\n";
     summary << "FILES_FAILED=" << total.files_failed << "\n";
     summary << "SKIPPED_NON_XFBAR=" << total.skipped_non_xfbar << "\n";
+    summary << "M5_ATR_MISSING_FILES=" << total.m5_atr_missing_files << "\n";
     summary << "FORMATIONS_DEV=" << total.formations_dev << "\n";
+    summary << "ACCEPTED_ZONES_DEV=" << total.accepted_zones_dev << "\n";
+    summary << "REJECTED_GAP_DEV=" << total.rejected_gap_dev << "\n";
     summary << "SELECTED=" << total.selected << "\n";
-    summary << "SELECTED_ENGULF_2=" << total.selected_e2 << "\n";
-    summary << "SELECTED_ENGULF_3=" << total.selected_e3 << "\n";
     summary << "NO_OUTSIDE_BEFORE_CUTOFF=" << total.no_outside << "\n";
     summary << "BROKEN_BEFORE_EXPECTED_DEPARTURE="
             << total.broken_before_departure << "\n";
     summary << "NO_RETURN_BEFORE_CUTOFF=" << total.no_return << "\n";
-    summary << "DIRECT_BREAKOUT_NO_CLOSE_TOUCH=" << total.direct_breakout << "\n";
+    summary << "DIRECT_BREAKOUT_NO_CLOSE_TOUCH="
+            << total.direct_breakout << "\n";
     summary << "REACTION_FIRST=" << total.reaction_first << "\n";
     summary << "BREAKOUT_FIRST=" << total.breakout_first << "\n";
-    summary << "TOUCH_UNRESOLVED_AT_CUTOFF=" << total.touch_unresolved << "\n";
-    summary << "TOUCH_DEFINITION=CLOSE_REENTRY_AFTER_EXPECTED_DEPARTURE\n";
-    summary << "OUTCOME_DEFINITION=FIRST_CLOSE_OUTSIDE_RECTANGLE_AFTER_TOUCH\n";
+    summary << "TOUCH_UNRESOLVED_AT_CUTOFF="
+            << total.touch_unresolved << "\n";
     summary.close();
 
     std::cout << "------------------------------------------------------------\n";
@@ -609,7 +674,13 @@ int main(int argc, char** argv) {
     std::cout << "FILES_PASSED=" << total.files_passed << "\n";
     std::cout << "FILES_FAILED=" << total.files_failed << "\n";
     std::cout << "SKIPPED_NON_XFBAR=" << total.skipped_non_xfbar << "\n";
+    std::cout << "M5_ATR_MISSING_FILES="
+              << total.m5_atr_missing_files << "\n";
     std::cout << "FORMATIONS_DEV=" << total.formations_dev << "\n";
+    std::cout << "ACCEPTED_ZONES_DEV="
+              << total.accepted_zones_dev << "\n";
+    std::cout << "REJECTED_GAP_DEV="
+              << total.rejected_gap_dev << "\n";
     std::cout << "SELECTED=" << total.selected << "\n";
     std::cout << "REACTION_FIRST=" << total.reaction_first << "\n";
     std::cout << "BREAKOUT_FIRST=" << total.breakout_first << "\n";
@@ -621,8 +692,10 @@ int main(int argc, char** argv) {
         return 7;
     }
 
-    if (total.selected == 0) {
-        std::cout << "BLOCK03 FAIL - ZERO_SELECTED_EVENTS\n";
+    if (total.accepted_zones_dev == 0 ||
+        total.selected == 0)
+    {
+        std::cout << "BLOCK03 FAIL - ZERO_ACCEPTED_OR_SELECTED\n";
         return 8;
     }
 
