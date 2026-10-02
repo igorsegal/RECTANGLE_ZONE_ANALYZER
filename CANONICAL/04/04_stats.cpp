@@ -274,15 +274,15 @@ int main(int argc, char** argv) {
     write_group_csv(groups, "OVERALL", "ALL", overall);
 
     for (const auto& kv : by_progress)
-        write_group_csv(groups, "ENGULF3_PROGRESS", kv.first, kv.second);
+        write_group_csv(groups, "PROGRESS_AVAILABLE", kv.first, kv.second);
     for (const auto& kv : by_direction)
         write_group_csv(groups, "DIRECTION", kv.first, kv.second);
     for (const auto& kv : by_timeframe)
         write_group_csv(groups, "TIMEFRAME", kv.first, kv.second);
     for (const auto& kv : by_progress_direction)
-        write_group_csv(groups, "ENGULF3_PROGRESS_DIRECTION", kv.first, kv.second);
+        write_group_csv(groups, "PROGRESS_DIRECTION", kv.first, kv.second);
     for (const auto& kv : by_progress_timeframe)
-        write_group_csv(groups, "ENGULF3_PROGRESS_TIMEFRAME", kv.first, kv.second);
+        write_group_csv(groups, "PROGRESS_TIMEFRAME", kv.first, kv.second);
 
     groups.close();
 
