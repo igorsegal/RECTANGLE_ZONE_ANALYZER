@@ -1,6 +1,7 @@
 #include "../01/formation_detector.h"
 #include "xfbar_reader.h"
 
+#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <fstream>
@@ -36,9 +37,9 @@ std::string csv_field(const std::string& s) {
         return s;
     }
 
-    std::string out = """;
+    std::string out = "\"";
     for (char c : s) {
-        if (c == '"') out += """";
+        if (c == '"') out += "\"\"";
         else out += c;
     }
     out += '"';
