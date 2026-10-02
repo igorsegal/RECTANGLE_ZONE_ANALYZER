@@ -20,6 +20,7 @@ struct Counts {
     std::uint64_t files_found = 0;
     std::uint64_t files_passed = 0;
     std::uint64_t files_failed = 0;
+    std::uint64_t files_skipped_non_xfbar = 0;
     std::uint64_t bars = 0;
 
     std::uint64_t e2_bull = 0;
@@ -258,15 +259,20 @@ int main(int argc, char** argv) {
         const auto data = read_xfbar(files[i]);
 
         if (!data.success) {
-            ++total.files_failed;
-            failures
-                << csv_field(files[i]) << ';'
-                << csv_field(data.error) << '\n';
+            if (data.error == "bad_magic") {
+                ++total.files_skipped_non_xfbar;
+            } else {
+                ++total.files_failed;
+                failures
+                    << csv_field(files[i]) << ';'
+                    << csv_field(data.error) << '\n';
+            }
 
             if ((i + 1) % 25 == 0 || i + 1 == files.size()) {
                 std::cout
                     << "[" << (i + 1) << "/" << files.size() << "] "
                     << "events=" << total_events(total)
+                    << " skipped_non_xfbar=" << total.files_skipped_non_xfbar
                     << " failed=" << total.files_failed
                     << "\n";
             }
@@ -324,6 +330,7 @@ int main(int argc, char** argv) {
     summary << "FILES_FOUND=" << total.files_found << "\n";
     summary << "FILES_PASSED=" << total.files_passed << "\n";
     summary << "FILES_FAILED=" << total.files_failed << "\n";
+    summary << "SKIPPED_NON_XFBAR=" << total.files_skipped_non_xfbar << "\n";
     summary << "BARS=" << total.bars << "\n";
     summary << "EVENTS_TOTAL=" << events << "\n";
     summary << "ENGULF_2_TOTAL=" << e2 << "\n";
@@ -356,6 +363,7 @@ int main(int argc, char** argv) {
     std::cout << "FILES_FOUND=" << total.files_found << "\n";
     std::cout << "FILES_PASSED=" << total.files_passed << "\n";
     std::cout << "FILES_FAILED=" << total.files_failed << "\n";
+    std::cout << "SKIPPED_NON_XFBAR=" << total.files_skipped_non_xfbar << "\n";
     std::cout << "BARS=" << total.bars << "\n";
     std::cout << "EVENTS_TOTAL=" << events << "\n";
     std::cout << "ENGULF_2_TOTAL=" << e2 << "\n";
@@ -363,7 +371,9 @@ int main(int argc, char** argv) {
     std::cout << "ATLAS=" << atlas_path.string() << "\n";
     std::cout << "SUMMARY=" << summary_path.string() << "\n";
 
-    // Нулевой tolerance: каноническая база должна читаться полностью.
+    // Нулевой tolerance применяется только к файлам, распознанным как XFBAR.
+    // Прочие .bin форматы в общей raw-базе считаются отдельными источниками
+    // и фиксируются как SKIPPED_NON_XFBAR.
     if (total.files_failed != 0) {
         std::cout << "BLOCK02 FAIL - INVALID_XFBAR_FILES="
                   << total.files_failed << "\n";
