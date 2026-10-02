@@ -212,7 +212,6 @@ int main(int argc, char** argv) {
     const std::vector<std::string> required = {
         "Direction",
         "Timeframe",
-        "ProgressBucket",
         "LifecycleResult"
     };
 
@@ -225,11 +224,8 @@ int main(int argc, char** argv) {
     }
 
     Stats overall;
-    std::map<std::string, Stats> by_progress;
     std::map<std::string, Stats> by_direction;
     std::map<std::string, Stats> by_timeframe;
-    std::map<std::string, Stats> by_progress_direction;
-    std::map<std::string, Stats> by_progress_timeframe;
 
     std::uint64_t rows_read = 0;
     std::uint64_t malformed = 0;
@@ -249,7 +245,6 @@ int main(int argc, char** argv) {
 
         const std::string& direction = f[col["Direction"]];
         const std::string& timeframe = f[col["Timeframe"]];
-        const std::string& progress = f[col["ProgressBucket"]];
         const std::string& outcome = f[col["LifecycleResult"]];
 
         ++rows_read;
@@ -257,14 +252,6 @@ int main(int argc, char** argv) {
         update(overall, outcome);
         update(by_direction[direction], outcome);
         update(by_timeframe[timeframe], outcome);
-
-        // All confirmed engulf rectangles are one continuous research stream.
-        // Progress is optional metadata and is grouped only when it is present.
-        if (!progress.empty()) {
-            update(by_progress[progress], outcome);
-            update(by_progress_direction[progress + "|" + direction], outcome);
-            update(by_progress_timeframe[progress + "|" + timeframe], outcome);
-        }
     }
 
     groups
@@ -273,16 +260,10 @@ int main(int argc, char** argv) {
 
     write_group_csv(groups, "OVERALL", "ALL", overall);
 
-    for (const auto& kv : by_progress)
-        write_group_csv(groups, "PROGRESS_AVAILABLE", kv.first, kv.second);
     for (const auto& kv : by_direction)
         write_group_csv(groups, "DIRECTION", kv.first, kv.second);
     for (const auto& kv : by_timeframe)
         write_group_csv(groups, "TIMEFRAME", kv.first, kv.second);
-    for (const auto& kv : by_progress_direction)
-        write_group_csv(groups, "PROGRESS_DIRECTION", kv.first, kv.second);
-    for (const auto& kv : by_progress_timeframe)
-        write_group_csv(groups, "PROGRESS_TIMEFRAME", kv.first, kv.second);
 
     groups.close();
 
@@ -304,17 +285,6 @@ int main(int argc, char** argv) {
     summary << "\n[OVERALL]\n";
     write_stats_line(summary, "ALL", overall);
 
-    summary << "\n[PROGRESS_WHERE_AVAILABLE]\n";
-    static const std::vector<std::string> progress_order = {
-        "P00_25", "P25_50", "P50_75", "P75_90", "P90_100"
-    };
-    for (const auto& p : progress_order) {
-        const auto it = by_progress.find(p);
-        if (it != by_progress.end()) {
-            write_stats_line(summary, p, it->second);
-        }
-    }
-
     summary << "\n[DIRECTION]\n";
     for (const auto& kv : by_direction)
         write_stats_line(summary, kv.first, kv.second);
@@ -328,6 +298,7 @@ int main(int argc, char** argv) {
     summary << "- No market BIN file is reopened.\n";
     summary << "- No threshold, filter, TP, SL or parameter is optimized.\n";
     summary << "- ENGULF_2 and ENGULF_3 are not separate research branches.\n";
+    summary << "- Progress is not used as a feature, filter, split or research branch.\n";
     summary << "- All confirmed engulf rectangles form one continuous stream.\n";
     summary << "- ReactionPct is descriptive development evidence, not trading expectancy.\n";
     summary << "- 2024+ remains reserved for the final independent OOS check.\n";
