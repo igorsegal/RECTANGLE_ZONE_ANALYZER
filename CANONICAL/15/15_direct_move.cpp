@@ -1380,7 +1380,7 @@ int main(int argc, char** argv) {
 
     std::cout
         << "============================================================\n"
-        << "RZA BLOCK 15 FIX2R - DIRECT MOVE AFTER ENGULFING\n"
+        << "RZA BLOCK 15 FIX3 - DIRECT MOVE AFTER ENGULFING\n"
         << "RESEARCH_SCOPE=ALL_AVAILABLE_HISTORY\n"
         << "SIGNAL=ABS_TRACK_V2_ACCEPTED_H1_RECTANGLE\n"
         << "DIRECT_PHASE=FIRST_EXPECTED_M5_CLOSE_OUTSIDE_ZONE -> FIRST_RETURN_TO_ZONE\n"
@@ -1965,7 +1965,7 @@ int main(int argc, char** argv) {
     }
 
     summary
-        << "RZA BLOCK 15 FIX2R - DIRECT MOVE AFTER ENGULFING\n"
+        << "RZA BLOCK 15 FIX3 - DIRECT MOVE AFTER ENGULFING\n"
         << "RESEARCH_SCOPE=ALL_AVAILABLE_HISTORY\n"
         << "SIGNAL_TIMEFRAME=H1\n"
         << "PATH_TIMEFRAME=M5\n"
