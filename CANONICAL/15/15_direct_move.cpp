@@ -26,10 +26,7 @@ namespace {
 constexpr std::int32_t H1_SECONDS = 3600;
 constexpr std::int32_t M5_SECONDS = 300;
 
-constexpr std::array<int, 11> LEVELS{{
-    89, 100, 150, 200, 250, 300,
-    350, 400, 500, 1000, 2000
-}};
+constexpr std::array<int, 1> LEVELS{{89}};
 
 struct Seen {
     std::uint64_t fingerprint = 0;
@@ -1384,7 +1381,7 @@ int main(int argc, char** argv) {
         << "RESEARCH_SCOPE=ALL_AVAILABLE_HISTORY\n"
         << "SIGNAL=ABS_TRACK_V2_ACCEPTED_H1_RECTANGLE\n"
         << "DIRECT_PHASE=FIRST_EXPECTED_M5_CLOSE_OUTSIDE_ZONE -> FIRST_RETURN_TO_ZONE\n"
-        << "LEVELS=89,100,150,200,250,300,350,400,500,1000,2000\n"
+        << "LEVELS=89\n"
         << "LEVEL_REFERENCE=PARENT_OUTER_EDGE\n"
         << "NO_REACTION_LEG_USED=1\n"
         << "PRECHECK=STRICT_FULL_SERIES_H1_M5_COHERENCE\n"
@@ -1974,7 +1971,7 @@ int main(int argc, char** argv) {
         << "DIRECT_PHASE_START=FIRST_M5_CLOSE_OUTSIDE_PARENT_ZONE_IN_SIGNAL_DIRECTION\n"
         << "DIRECT_PHASE_END=FIRST_M5_RETURN_TOUCH_PARENT_ZONE_OR_PARENT_DELETION_OR_DATA_END\n"
         << "LEVEL_REFERENCE=PARENT_OUTER_EDGE\n"
-        << "LEVELS_POINTS=89,100,150,200,250,300,350,400,500,1000,2000\n"
+        << "LEVELS_POINTS=89\n"
         << "RETURN_BAR_TARGET_ORDER_ASSUMED=0\n"
         << "REACTION_LEG_USED=0\n"
         << "SPREAD_COMMISSION_SLIPPAGE=NOT_APPLICABLE_BEHAVIOR_TEST\n"
@@ -2133,7 +2130,7 @@ int main(int argc, char** argv) {
         << "- If target and return first occur in the same M5 bar, the event is AMBIGUOUS; intrabar order is never invented.\n"
         << "- If the parent lifecycle ends before target and without a return touch, the target is a lifecycle miss.\n"
         << "- Open-ended final-history cases are censored and excluded from clear hit percentages.\n"
-        << "- 89, 1000 and 2000 point levels are included exactly as requested; no optimization or threshold fitting is performed.\n"
+        << "- Only the fixed 89-point level is measured; no optimization or threshold fitting is performed.\n"
         << "- FIX3 performs a STRICT FULL-SERIES H1/M5 preflight BEFORE ATR, gap acceptance, active-zone replay, and path measurement.\n"
         << "- H1 and M5 must have matching symbol metadata, digits and point size.\n"
         << "- Every H1 bar must contain at least one M5 bar inside its own [H1_time, H1_time+3600) interval. Exact hh:00 anchoring is not required for partial-session hours.\n"
