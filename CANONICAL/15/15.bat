@@ -21,7 +21,7 @@ if not exist "%CXX%" (
 )
 
 echo ============================================
-echo RZA BLOCK 15 FIX2R
+echo RZA BLOCK 15 FIX3
 echo DIRECT MOVE AFTER ENGULFING
 echo FAIL-CLOSED DATA/CRASH CONTRACT
 echo ============================================
