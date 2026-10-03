@@ -1,0 +1,58 @@
+name: RZA Block15 Coherence Audit Selftest
+
+on:
+  push:
+    paths:
+      - "CANONICAL/15/15_coherence_audit.cpp"
+      - "CANONICAL/15/15_coherence_audit.bat"
+      - ".github/workflows/block15-coherence-audit.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gcc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: >
+          g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+          CANONICAL/01/formation_detector.cpp
+          CANONICAL/02/xfbar_reader.cpp
+          CANONICAL/15/15_coherence_audit.cpp
+          -o coherence_audit
+      - name: Selftest
+        run: ./coherence_audit --selftest
+
+  clang:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: >
+          clang++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wsign-conversion
+          CANONICAL/01/formation_detector.cpp
+          CANONICAL/02/xfbar_reader.cpp
+          CANONICAL/15/15_coherence_audit.cpp
+          -o coherence_audit
+      - name: Selftest
+        run: ./coherence_audit --selftest
+
+  msvc:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build
+        shell: cmd
+        run: >
+          cl /nologo /std:c++17 /EHsc /W4 /permissive-
+          CANONICAL\01\formation_detector.cpp
+          CANONICAL\02\xfbar_reader.cpp
+          CANONICAL\15\15_coherence_audit.cpp
+          /Fe:coherence_audit.exe
+      - name: Selftest
+        shell: cmd
+        run: coherence_audit.exe --selftest
