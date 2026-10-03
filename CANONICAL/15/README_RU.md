@@ -178,3 +178,8 @@ M1 → deterministic builder → M5/M15/M30/H1/H4
 
 Канонические цифры Block15 появятся только после PASS FIX2R на допустимых
 coherent series и последующего tail/data audit.
+
+## Repository CI
+
+Ветка проверяется GitHub Actions на GCC, Clang и MSVC; каждый build обязан
+успешно выполнить встроенный `--selftest` до допуска market run.
