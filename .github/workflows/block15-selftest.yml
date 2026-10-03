@@ -1,0 +1,55 @@
+name: RZA Block15 Selftest
+
+on:
+  push:
+    paths:
+      - "CANONICAL/15/**"
+      - "CANONICAL/01/**"
+      - "CANONICAL/02/**"
+      - "CANONICAL/abs_track_policy.h"
+      - ".github/workflows/block15-selftest.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gcc:
+    name: GCC C++17 + selftest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Block15
+        run: |
+          g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Wconversion -Wshadow             CANONICAL/01/formation_detector.cpp             CANONICAL/02/xfbar_reader.cpp             CANONICAL/15/15_direct_move.cpp             -o block15_selftest
+      - name: Run deterministic selftests
+        run: ./block15_selftest --selftest
+
+  clang:
+    name: Clang C++17 + selftest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Block15
+        run: |
+          clang++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wsign-conversion             CANONICAL/01/formation_detector.cpp             CANONICAL/02/xfbar_reader.cpp             CANONICAL/15/15_direct_move.cpp             -o block15_selftest
+      - name: Run deterministic selftests
+        run: ./block15_selftest --selftest
+
+  msvc:
+    name: MSVC C++17 + selftest
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build Block15
+        shell: cmd
+        run: >
+          cl /nologo /std:c++17 /EHsc /W4 /permissive-
+          CANONICAL\01\formation_detector.cpp
+          CANONICAL\02\xfbar_reader.cpp
+          CANONICAL\15\15_direct_move.cpp
+          /Fe:block15_selftest.exe
+      - name: Run deterministic selftests
+        shell: cmd
+        run: block15_selftest.exe --selftest
