@@ -1,0 +1,13 @@
+name: RZA Block15 Selftest
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  registered:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Block15 CI workflow registered on default branch."
