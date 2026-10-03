@@ -621,28 +621,29 @@ SeriesCoherenceResult validate_series_coherence(
         const std::size_t begin =
             lower_bound_time(m5.bars, hb.time);
 
-        if (begin >= m5.bars.size()) {
-            r.reason = "M5_HISTORY_ENDS_BEFORE_H1_BAR";
-            r.m5_time = 0;
-            return r;
-        }
-
-        r.m5_time = m5.bars[begin].time;
-
-        if (m5.bars[begin].time != hb.time) {
-            r.reason = "M5_HOUR_ANCHOR_MISSING";
-            return r;
-        }
-
         const std::size_t end =
             lower_bound_time(
                 m5.bars,
                 hb.time + H1_SECONDS);
 
-        if (end <= begin) {
+        if (begin >= m5.bars.size() ||
+            end <= begin ||
+            m5.bars[begin].time >= hb.time + H1_SECONDS)
+        {
             r.reason = "NO_M5_BARS_INSIDE_H1_INTERVAL";
+            r.m5_time =
+                begin < m5.bars.size()
+                    ? m5.bars[begin].time
+                    : 0;
             return r;
         }
+
+        // FIX3: an H1 bar is a time container, not a promise that
+        // the first tradable M5 bar exists at hh:00. Session markets
+        // may legitimately start later inside the hour (for example
+        // hh:30). The series is coherent when the available M5 bars
+        // inside [H1_time, H1_time+3600) reproduce the full H1 OHLC.
+        r.m5_time = m5.bars[begin].time;
 
         const double m_open = m5.bars[begin].open;
         const double m_high =
@@ -1054,8 +1055,8 @@ int run_selftest() {
     M5Index late_idx(late.bars);
     auto late_result = validate_series_coherence(h1, late, late_idx);
     check(!late_result.ok &&
-          late_result.reason == "M5_HOUR_ANCHOR_MISSING",
-          "late M5 history is rejected before research replay");
+          late_result.reason == "NO_M5_BARS_INSIDE_H1_INTERVAL",
+          "H1 hour with no M5 bars is rejected before research replay");
 
     XfbarData bad_open = m5;
     bad_open.bars[12].open += 1.0;
@@ -1141,9 +1142,8 @@ int run_selftest() {
     M5Index internal_gap_idx(internal_gap.bars);
     const auto internal_gap_result =
         validate_series_coherence(h1, internal_gap, internal_gap_idx);
-    check(!internal_gap_result.ok &&
-          internal_gap_result.reason == "M5_HOUR_ANCHOR_MISSING",
-          "internal missing H1-hour M5 anchor is rejected");
+    check(internal_gap_result.ok,
+          "partial-session H1 hour is accepted when M5 aggregate matches");
 
     XfbarData bad_low = m5;
     bad_low.bars[4].low -= 1.0;
@@ -1639,7 +1639,9 @@ int main(int argc, char** argv) {
                     m5.bars,
                     signal_time);
 
-            if (signal_m5 >= m5.bars.size()) {
+            if (signal_m5 >= m5.bars.size() ||
+                m5.bars[signal_m5].time >= signal_time + H1_SECONDS)
+            {
                 ++series.signal_m5_missing;
                 ++year_stats.signal_m5_missing;
                 continue;
@@ -1678,36 +1680,6 @@ int main(int argc, char** argv) {
                     std::min(
                         std::abs(signal_h1_open),
                         std::abs(signal_m5_open));
-            }
-
-            if (signal_m5_time != signal_time) {
-                ++series.signal_m5_time_mismatch;
-                ++year_stats.signal_m5_time_mismatch;
-
-                integrity
-                    << csv_field(h1.symbol)
-                    << ';'
-                    << signal_time
-                    << ';'
-                    << signal_m5_time
-                    << ';'
-                    << std::fixed
-                    << std::setprecision(10)
-                    << signal_h1_open
-                    << ';'
-                    << signal_m5_open
-                    << ';'
-                    << open_diff_points
-                    << ';';
-
-                if (std::isfinite(open_price_ratio)) {
-                    integrity << open_price_ratio;
-                }
-
-                integrity
-                    << ";M5_TIME_NOT_EQUAL_H1_SIGNAL_TIME\n";
-
-                continue;
             }
 
             if (!(point_tolerance > 0.0) ||
@@ -2162,10 +2134,10 @@ int main(int argc, char** argv) {
         << "- If the parent lifecycle ends before target and without a return touch, the target is a lifecycle miss.\n"
         << "- Open-ended final-history cases are censored and excluded from clear hit percentages.\n"
         << "- 1000 and 2000 point levels are added exactly as requested; no optimization or threshold fitting is performed.\n"
-        << "- FIX2 performs a STRICT FULL-SERIES H1/M5 preflight BEFORE ATR, gap acceptance, active-zone replay, and path measurement.\n"
+        << "- FIX3 performs a STRICT FULL-SERIES H1/M5 preflight BEFORE ATR, gap acceptance, active-zone replay, and path measurement.\n"
         << "- H1 and M5 must have matching symbol metadata, digits and point size.\n"
-        << "- Every H1 bar must have an M5 bar at the exact same opening timestamp.\n"
-        << "- For every H1 bar, M5 aggregation over that hour must reproduce H1 open/high/low/close within one quote point.\n"
+        << "- Every H1 bar must contain at least one M5 bar inside its own [H1_time, H1_time+3600) interval. Exact hh:00 anchoring is not required for partial-session hours.\n"
+        << "- For every H1 bar, all available M5 bars inside that hour must reproduce H1 open/high/low/close within one quote point.\n"
         << "- A series with any coherence failure is excluded in full, preventing unknown active-zone state from contaminating later events.\n"
         << "- Duplicate M5 siblings are accepted only when byte-semantic fingerprints are identical; conflicting M5 duplicates are a data-contract failure.\n"
         << "- The one-point tolerance is tied to quote granularity, not fitted to outcomes.\n"
@@ -2194,7 +2166,7 @@ int main(int argc, char** argv) {
 
     std::cout
         << "============================================================\n"
-        << "BLOCK15 FIX2R PASS\n"
+        << "BLOCK15 FIX3 PASS\n"
         << "ACCEPTED_ZONES="
         << all.accepted_zones
         << '\n'

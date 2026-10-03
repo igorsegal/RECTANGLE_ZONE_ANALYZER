@@ -2,7 +2,7 @@
 
 ## Статус
 
-Текущая версия: **FIX2R**.
+Текущая версия: **FIX3**.
 
 Это исследование поведения цены, а не торговая модель.
 
@@ -63,7 +63,7 @@ Direct departure считается подтверждённым только п
 SAME_M5_AMBIGUOUS
 ```
 
-## FIX2R: fail-closed data contract
+## FIX3: fail-closed data contract
 
 Главное изменение — H1/M5 проверяются **до** ATR, gap gate, active-zone replay
 и измерения direct path.
@@ -85,8 +85,9 @@ load H1 + M5
 1. H1 и M5 принадлежат одному symbol.
 2. `Digits` совпадает.
 3. `Point` совпадает.
-4. Для каждого H1 open timestamp существует M5 bar с тем же timestamp.
-5. M5 aggregate внутри H1-интервала воспроизводит H1:
+4. Для каждого H1-интервала [H1_time, H1_time+3600) существует хотя бы один M5 bar.
+   Точный M5 timestamp в hh:00 не обязателен: сессионный рынок может начинаться позже внутри часа.
+5. Все доступные M5 bars внутри этого H1-интервала воспроизводят H1:
    - Open,
    - max High,
    - min Low,
@@ -112,6 +113,26 @@ active state уже может отличаться от истинного.
 Поэтому при неизвестной когерентности серия не частично чинится, а целиком
 не допускается к статистике.
 
+## Основание для FIX3
+
+Отдельный coherence audit по текущей базе дал:
+
+```text
+PAIRS_AUDITED=522
+CLEAN_PAIRS=521
+BAD_PAIRS=1 (EURUSD)
+H1_PARTIAL_ANCHOR=407106
+H1_PARTIAL_ANCHOR_OHLC_MATCH=407058
+PARTIAL_ANCHOR_MATCH_PCT_OF_PARTIAL=99.988209459
+```
+
+То есть требование exact M5 anchor в hh:00 было слишком строгим и ошибочно
+смешивало нормальную сессионную структуру с реальным дефектом данных.
+
+EURUSD остаётся incoherent series и исключается целиком: в нём сосредоточены
+все 42,718 H1-часов без M5 внутри часа и все 11,464 OHLC mismatch.
+Одна H1 series без M5 sibling также остаётся отдельным явным skip.
+
 ## Встроенные self-tests
 
 Перед полным запуском `15.bat` автоматически выполняет:
@@ -120,11 +141,11 @@ active state уже может отличаться от истинного.
 rza_block15.exe --selftest
 ```
 
-FIX2R содержит 20 детерминированных проверок, включая:
+FIX3 содержит 20 детерминированных проверок, включая:
 
 - точную H1/M5 OHLC aggregation;
-- позднее начало M5;
-- внутренне отсутствующий H1-hour M5 anchor;
+- полный H1-час без M5;
+- partial-session H1 hour, где первый M5 начинается позже hh:00, но агрегат OHLC совпадает;
 - Open/High/Low/Close mismatch;
 - Point mismatch;
 - Digits mismatch;
@@ -167,7 +188,7 @@ single source of truth = M1
 M1 → deterministic builder → M5/M15/M30/H1/H4
 ```
 
-До появления новой M1-базы FIX2R позволяет использовать имеющуюся базу только
+До появления новой M1-базы FIX3 позволяет использовать имеющуюся базу только
 в fail-closed режиме и явно показывает, какие series не прошли data contract.
 
 ## Что не является каноническим результатом
@@ -176,7 +197,7 @@ M1 → deterministic builder → M5/M15/M30/H1/H4
 для 2000 points. После обнаружения temporal-alignment contamination эти
 значения считать **предварительными и не использовать как доказательство**.
 
-Канонические цифры Block15 появятся только после PASS FIX2R на допустимых
+Канонические цифры Block15 появятся только после PASS FIX3 на допустимых
 coherent series и последующего tail/data audit.
 
 ## Repository CI
