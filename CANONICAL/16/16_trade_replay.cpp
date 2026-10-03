@@ -66,13 +66,8 @@ Trade replay(const Event&e,const XfbarData&m){
 
 int year_utc(std::int64_t ts){
  std::time_t tt=static_cast<std::time_t>(ts);
- std::tm tm{};
-#ifdef _WIN32
- if(gmtime_s(&tm,&tt)!=0)return 0;
-#else
- if(gmtime_r(&tt,&tm)==nullptr)return 0;
-#endif
- return tm.tm_year+1900;
+ const std::tm* tm=std::gmtime(&tt);
+ return tm ? tm->tm_year+1900 : 0;
 }
 void header(std::ostream&o,const char*k){o<<k<<";Eligible;Closed;Wins;Losses;WinRatePct;AmbiguousAsSL;Censored;Invalid;AvgR;ProfitFactorR;SumR;AvgRiskPoints;MinR;MaxR\n";}
 void row(std::ostream&o,const std::string&k,const Stats&s){o<<k<<';'<<s.n<<';'<<s.closed<<';'<<s.wins<<';'<<s.losses<<';'<<std::setprecision(12)<<s.wr()<<';'<<s.ambig<<';'<<s.censored<<';'<<s.invalid<<';'<<s.avgR()<<';'<<s.pf()<<';'<<double(s.sumR)<<';'<<s.avgRisk()<<';';if(s.closed)o<<s.minR<<';'<<s.maxR;else o<<"NA;NA";o<<'\n';}
