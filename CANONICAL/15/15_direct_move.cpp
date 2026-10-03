@@ -976,10 +976,15 @@ int utc_year(std::int64_t epoch) {
     const std::time_t tt =
         static_cast<std::time_t>(epoch);
 
-    const std::tm* g =
-        std::gmtime(&tt);
+    std::tm g{};
 
-    return g ? g->tm_year + 1900 : 0;
+#ifdef _WIN32
+    if (gmtime_s(&g, &tt) != 0) return 0;
+#else
+    if (gmtime_r(&tt, &g) == nullptr) return 0;
+#endif
+
+    return g.tm_year + 1900;
 }
 
 int run_selftest() {
